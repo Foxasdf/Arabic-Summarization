@@ -1,0 +1,18 @@
+# Arabic Meeting Summarizer - Core Requirements
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic-settings
+llama-cpp-python>=0.3.16
+numpy
+scipy
+imageio-ffmpeg
+psutil
+huggingface-hub
+aiosqlite
+
+# Pyannote Speaker Diarization & PyTorch Stack (Local Offline Diarization)
+torch
+torchaudio
+pyannote.audio
+pyyaml

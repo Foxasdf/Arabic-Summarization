@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: meeting-summarizer-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      # External models directory mounted as read-only volume
+      - ./models:/app/models:ro
+      - ./backend/uploads:/app/uploads
+      - ./backend/data:/app/data
+    environment:
+      - MEETING_HOST=0.0.0.0
+      - MEETING_PORT=8000
+      - MEETING_MODELS_DIR=/app/models
+      - MEETING_UPLOAD_DIR=/app/uploads
+      - MEETING_DB_PATH=/app/data/meetings.db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: meeting-summarizer-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped

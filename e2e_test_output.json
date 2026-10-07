@@ -1,0 +1,297 @@
+{
+  "hardware": {
+    "cpu_threads": 16,
+    "ram_total_gb": 15.3,
+    "ram_available_gb": 4.7,
+    "gpu_name": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "vram_total_gb": 6.0,
+    "vram_free_gb": 5.9,
+    "llama_gpu_offload": false,
+    "tier": "low"
+  },
+  "diarization_turns": [
+    {
+      "speaker": "SPEAKER_00",
+      "start": 0.0,
+      "end": 4.5
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "start": 4.5,
+      "end": 6.75
+    },
+    {
+      "speaker": "SPEAKER_00",
+      "start": 6.75,
+      "end": 9.75
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "start": 9.75,
+      "end": 15.0
+    },
+    {
+      "speaker": "SPEAKER_00",
+      "start": 15.0,
+      "end": 17.25
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "start": 17.25,
+      "end": 27.75
+    },
+    {
+      "speaker": "SPEAKER_00",
+      "start": 27.75,
+      "end": 37.5
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "start": 37.5,
+      "end": 39.0
+    },
+    {
+      "speaker": "SPEAKER_00",
+      "start": 39.0,
+      "end": 43.5
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "start": 43.5,
+      "end": 45.0
+    },
+    {
+      "speaker": "SPEAKER_00",
+      "start": 45.0,
+      "end": 48.75
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "start": 48.75,
+      "end": 52.5
+    },
+    {
+      "speaker": "SPEAKER_00",
+      "start": 52.5,
+      "end": 54.0
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "start": 54.0,
+      "end": 62.25
+    },
+    {
+      "speaker": "SPEAKER_00",
+      "start": 62.25,
+      "end": 64.5
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "start": 64.5,
+      "end": 85.35
+    },
+    {
+      "speaker": "SPEAKER_00",
+      "start": 86.09,
+      "end": 87.75
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "start": 87.75,
+      "end": 94.5
+    },
+    {
+      "speaker": "SPEAKER_00",
+      "start": 94.5,
+      "end": 96.75
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "start": 96.75,
+      "end": 105.75
+    },
+    {
+      "speaker": "SPEAKER_00",
+      "start": 105.75,
+      "end": 108.75
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "start": 108.75,
+      "end": 113.25
+    },
+    {
+      "speaker": "SPEAKER_00",
+      "start": 113.25,
+      "end": 117.31
+    },
+    {
+      "speaker": "SPEAKER_00",
+      "start": 118.72,
+      "end": 119.1
+    },
+    {
+      "speaker": "SPEAKER_00",
+      "start": 120.8,
+      "end": 124.76
+    },
+    {
+      "speaker": "SPEAKER_00",
+      "start": 125.87,
+      "end": 130.38
+    },
+    {
+      "speaker": "SPEAKER_00",
+      "start": 132.76,
+      "end": 135.91
+    },
+    {
+      "speaker": "SPEAKER_00",
+      "start": 137.13,
+      "end": 143.39
+    },
+    {
+      "speaker": "SPEAKER_00",
+      "start": 144.57,
+      "end": 149.98
+    }
+  ],
+  "aligned_segments": [
+    {
+      "speaker": "SPEAKER_00",
+      "text": "الصحة النفسية مهمة جدا بالنسبة لي ومهمة للكثير",
+      "start": 0.0,
+      "end": 4.26
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "text": "لأن العلاقات جزء مهم في",
+      "start": 4.26,
+      "end": 6.91
+    },
+    {
+      "speaker": "SPEAKER_00",
+      "text": "الصحة النفسية. أود أن أتحدث",
+      "start": 6.91,
+      "end": 9.57
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "text": "بعمق عن العلاقات الإنسانية التي تبدأ من علاقة الإنسان بالله",
+      "start": 9.57,
+      "end": 14.89
+    },
+    {
+      "speaker": "SPEAKER_00",
+      "text": "وحاجته لعلاقة روحية وتمر",
+      "start": 14.89,
+      "end": 17.02
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "text": "بعلاقته مع ذاته وهي علاقة مهمة جدا لأن كل العلاقات تستند على علاقة الواحد بذاته. كيف أكون محب نفسي؟ متى أكون",
+      "start": 17.02,
+      "end": 27.94
+    },
+    {
+      "speaker": "SPEAKER_00",
+      "text": "واثق؟ متى أكون مغرور؟ كيف أصلح من علاقتي مع ذاتي؟ وكيف ممكن تكون علاقتي مع ذاتي صحية؟ لو ما كانت",
+      "start": 27.94,
+      "end": 37.75
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "text": "صحية كيف أعالجها؟",
+      "start": 37.75,
+      "end": 39.22
+    },
+    {
+      "speaker": "SPEAKER_00",
+      "text": "وإذا تعدنا العلاقة مع الذات وهي علاقة تحت سيطرتي",
+      "start": 39.22,
+      "end": 43.63
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "text": "على الأقل، كيف",
+      "start": 43.63,
+      "end": 45.1
+    },
+    {
+      "speaker": "SPEAKER_00",
+      "text": "نتعامل مع العلاقات مع الناس في عالم",
+      "start": 45.1,
+      "end": 48.53
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "text": "يعيش الفردانية النسبية؟ فكيف يتعايش الإنسان مع علاقات تحت هذه الظروف؟ والعلاقات تختلف وتتنوع وتختلف مراتبها وتبعاتها على الواحد، ولذا هذه الحلقة مع",
+      "start": 48.53,
+      "end": 62.5
+    },
+    {
+      "speaker": "SPEAKER_00",
+      "text": "ياسر الحزيبي مدرب",
+      "start": 62.5,
+      "end": 64.38
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "text": "معتمد من جهات مختلفة ولها خبرة طويلة في تقديم الدورات والمحاضرات في مجال تطوير العلاقات ومهارات الاتصال. من العلاقة مع الذات حتى العلاقة بين الجنسين سواء في مكان العمل أو كزوجين، حلقة مهمة للجميع فمن",
+      "start": 64.38,
+      "end": 85.71
+    },
+    {
+      "speaker": "SPEAKER_00",
+      "text": "لا يهتم لضبط",
+      "start": 85.71,
+      "end": 87.5
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "text": "علاقاته في هذه الحياة. قبل أن نبدأ في سلسلة أفلام مثائقية بديعة",
+      "start": 87.5,
+      "end": 94.64
+    },
+    {
+      "speaker": "SPEAKER_00",
+      "text": "صنعها زملائي في ثمانية،",
+      "start": 94.64,
+      "end": 97.02
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "text": "هذه السلسلة عن الجينات وأثرها على كل شي في حياتنا، من حياتك وصفات أولادك",
+      "start": 97.02,
+      "end": 105.77
+    },
+    {
+      "speaker": "SPEAKER_00",
+      "text": "وحتى أمراضك ومستقبلك، كلها تعتمد",
+      "start": 105.77,
+      "end": 108.97
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "text": "على الجينات. السلسله نشرت على قناة أفلام",
+      "start": 108.97,
+      "end": 113.46
+    },
+    {
+      "speaker": "SPEAKER_00",
+      "text": "ثمانية في يوتيوب تلقاها في وصف هذه الحلقة. أما الآن، لنبدأ. كيف تجربتك في البودكاست يعني؟ بشكل عام؟ لكن كمقدم فيها جهد صراحة فيها جهد ذهني عالي عالي عالي والله لأن يجونك ضيوف وفي الأخير يعطيك عموميات تضطر انك تسمع وتتقن مصدره خاصة إذا كنت في الموضوع عارفه كيف انت تتبنى فكرة",
+      "start": 113.46,
+      "end": 150.0
+    }
+  ],
+  "speakers_map": {
+    "SPEAKER_00": "عبدالرحمن أبو مالح",
+    "SPEAKER_01": "د. ياسر الحزيمي"
+  },
+  "summary": "## ملخص عام\nالاجتماع تطرق إلى أهمية الصحة النفسية والعلاقة بين الإنسان بالله، الذات، والناس في عالم يعيش الفردانية النسبية. الهدف كان استكشاف كيفية بناء علاقات صحية وبناءة وكيفية التعامل مع التحديات التي تواجه العلاقات الإنسانية.\n\n## مساهمات=\"#\"\n- **عبدالرحمن أبو مالح:** Health is very important to me and many others, especially mental health. He emphasized the need for a spiritual connection and explored how to build a healthy relationship with oneself, asking various questions about self-confidence, self-esteem, and self-improvement. He also discussed how to manage relationships with others in a world of relative individualism.\n- **د. ياسر الحزيمي:** Stressed the importance of human relationships starting with one's connection to God and self. Highlighted the role of self-relationship as a foundation for all other relationships. Mentioned his extensive experience in training and workshops on developing interpersonal skills and relationships. Introduced a documentary series on genetics and its impact on life, shared on the \"ثمانية\" YouTube channel.\n\n## النقاط=\"#\"\n- أهمية الصحة النفسية والعلاقة الروحية بالله **(عبدالرحمن أبو مالح)**.\n- التركيز على العلاقة مع الذات كقاعدة أساسية للعلاقات الأخرى **(د. ياسر الحزيمي)**.\n- استكشاف كيفية التعامل مع العلاقات الإنسانية في عالم الفردانية النسبية **(عبدالرحمن أبو مالح)**.\n- عرض سلسلة وثائقية عن الجينات وتأثيرها على حياة الإنسان **(د. ياسر الحزيمي)**.\n\n## القرارات=\"#\"\nلا توجد قرارات واضحة.\n\n## المهام=\"#\"\nلا توجد مهام محددة.",
+  "timings": {
+    "diarization_seconds": 5.867295503616333,
+    "asr_seconds": 91.91799211502075,
+    "summarization_seconds": 101.317862033844
+  }
+}
