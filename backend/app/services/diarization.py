@@ -24,6 +24,7 @@ from typing import List, Dict, Optional, Callable
 import numpy as np
 
 from ..config import settings
+from .hardware import get_hardware_profile
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +164,12 @@ def _get_or_create_local_pyannote_config() -> Path:
     cfg["pipeline"]["params"]["segmentation"] = str(seg_model)
     cfg["pipeline"]["params"]["embedding"] = str(emb_model)
 
+    # Dynamic batch sizes scaled to available GPU hardware
+    hw = get_hardware_profile()
+    d_params = hw.diarization_params()
+    cfg["pipeline"]["params"]["segmentation_batch_size"] = d_params["segmentation_batch_size"]
+    cfg["pipeline"]["params"]["embedding_batch_size"] = d_params["embedding_batch_size"]
+
     # Point to local PLDA calibration files if available (required for pyannote >= 4.0 offline execution)
     plda_dir = (pyannote_base / "plda").resolve()
     if plda_dir.exists() and (plda_dir / "xvec_transform.npz").exists() and (plda_dir / "plda.npz").exists():
@@ -240,6 +247,7 @@ def _diarize_pyannote_local(
     num_speakers: Optional[int],
     on_progress: Optional[Callable[[int, str], None]] = None,
 ) -> List[Dict]:
+    import gc
     import torch
 
     def _safe_progress(pct: int, msg: str):
@@ -253,9 +261,26 @@ def _diarize_pyannote_local(
 
     pipeline = get_pyannote_pipeline()
 
+    # Dynamic batch sizes scaled to current hardware profile
+    hw = get_hardware_profile()
+    d_params = hw.diarization_params()
+    seg_batch = d_params["segmentation_batch_size"]
+    emb_batch = d_params["embedding_batch_size"]
+
+    # Apply batch sizes directly to pipeline instance
+    pipeline.segmentation_batch_size = seg_batch
+    pipeline.embedding_batch_size = emb_batch
+    if hasattr(pipeline, "_segmentation") and hasattr(pipeline._segmentation, "batch_size"):
+        pipeline._segmentation.batch_size = seg_batch
+
     # Load audio into memory tensor safely (handles any audio format)
-    audio_data = _load_wav(audio_path)
+    audio_data = np.array(_load_wav(audio_path), dtype=np.float32, copy=True)
     waveform = torch.from_numpy(audio_data).unsqueeze(0)  # shape: (1, time)
+    if torch.cuda.is_available():
+        try:
+            waveform = waveform.pin_memory()
+        except Exception:
+            pass
     io_input = {"waveform": waveform, "sample_rate": SR}
 
     kwargs = {}
@@ -285,8 +310,16 @@ def _diarize_pyannote_local(
 
     kwargs["hook"] = hook
 
-    logger.info("Executing Pyannote diarization on GPU...")
-    result = pipeline(io_input, **kwargs)
+    # Free any leftover CUDA cache before launching heavy inference
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    logger.info(
+        f"Executing Pyannote diarization on GPU (seg_batch={seg_batch}, emb_batch={emb_batch})..."
+    )
+    with torch.inference_mode():
+        result = pipeline(io_input, **kwargs)
+
     # Prefer speaker_diarization to retain overlapping speech, backchannels, and rapid conversational interjections
     annotation = getattr(result, "speaker_diarization", result)
 
@@ -296,6 +329,15 @@ def _diarize_pyannote_local(
     ]
 
     logger.info(f"Pyannote completed with {len(turns)} speaker segments.")
+
+    # Cleanup temporary tensors and flush CUDA memory allocator cache
+    # This releases all reserved VRAM back to the GPU driver so subsequent ASR
+    # has 100% of GPU VRAM available for its multi-worker parallel transcription.
+    del io_input, waveform, audio_data, result
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     return turns
 
 
@@ -320,7 +362,7 @@ def _load_wav(path: Path) -> np.ndarray:
             from math import gcd
             g = gcd(sr, SR)
             data = resample_poly(data, SR // g, sr // g).astype(np.float32)
-        return data
+        return np.ascontiguousarray(data, dtype=np.float32)
     except Exception:
         # Fallback to ffmpeg raw audio decoding (handles mp3, m4a, flac, etc.)
         from .audio_processor import get_ffmpeg_binary
@@ -330,7 +372,7 @@ def _load_wav(path: Path) -> np.ndarray:
             "-f", "f32le", "-ac", "1", "-ar", str(SR), "-"
         ]
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True)
-        return np.frombuffer(proc.stdout, dtype=np.float32)
+        return np.ascontiguousarray(np.frombuffer(proc.stdout, dtype=np.float32), dtype=np.float32)
 
 
 def _mel_filterbank(n_fft: int, n_mels: int = 40, fmin: float = 60, fmax: float = 7600) -> np.ndarray:

@@ -76,6 +76,8 @@ class Settings(BaseSettings):
     DIARIZATION_NUM_SPEAKERS: int = 0
     DIARIZATION_MIN_SPEAKERS: int = 2
     DIARIZATION_MAX_SPEAKERS: int = 8
+    # 0 = auto-detect based on GPU VRAM (128 seg / 64 emb on >=10GB VRAM), or explicit override
+    DIARIZATION_BATCH_SIZE: int = 0
 
     # Timeouts (in seconds)
     AUDIO_CONVERT_TIMEOUT: int = 7200       # 2 hours for ffmpeg conversion of large audio

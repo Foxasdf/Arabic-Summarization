@@ -155,6 +155,16 @@ async def transcribe_endpoint(
                 n_spk = len({t['speaker'] for t in turns}) if turns else 1
                 yield _sse({"step": "diarization", "progress": 25, "message": f"تم اكتشاف {n_spk} متحدث/متحدثين بنجاح عبر Pyannote"})
 
+                # Explicitly flush PyTorch CUDA cache so ASR has 100% of GPU VRAM available
+                import gc
+                gc.collect()
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
+
                 # Full-coverage continuous ASR + Pyannote speaker alignment:
                 # Guarantees zero dropped words across the entire meeting while accurately assigning speaker turns
                 yield _sse({"step": "asr", "progress": 25, "message": "جاري تفريغ الصوت بنموذج ASR (تغطية كاملة للكلام)..."})
