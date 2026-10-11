@@ -18,6 +18,7 @@ Fallback backend:
 from pathlib import Path
 import logging
 import yaml
+import urllib.request
 from typing import List, Dict, Optional, Callable
 
 import numpy as np
@@ -27,6 +28,76 @@ from ..config import settings
 logger = logging.getLogger(__name__)
 
 SR = 16000
+
+
+# =============================================================================
+# Helper: Validate and ensure authentic Pyannote weights (not Git LFS pointers)
+# =============================================================================
+def _is_lfs_pointer_or_invalid(file_path: Path, min_size: int = 1_000_000) -> bool:
+    if not file_path.exists():
+        return True
+    if file_path.stat().st_size < min_size:
+        return True
+    try:
+        with open(file_path, "rb") as f:
+            header = f.read(30)
+            if header.startswith(b"version http") or b"git-lfs" in header:
+                return True
+    except Exception:
+        return True
+    return False
+
+
+def _ensure_valid_model_weight(file_path: Path, hf_repo: str, min_size: int, token: Optional[str] = None) -> None:
+    """
+    Validates that a PyTorch checkpoint is a real binary file (>min_size) and not a Git LFS text pointer.
+    If it is a pointer or corrupt, it attempts automatic recovery via Hugging Face.
+    """
+    if not _is_lfs_pointer_or_invalid(file_path, min_size):
+        return
+
+    logger.warning(
+        f"ملف أوزان النموذج {file_path.name} في ({file_path}) غير مكتمل أو مؤشر نصي Git LFS "
+        f"({file_path.stat().st_size if file_path.exists() else 0} بايت). "
+        f"جاري تحميل الأوزان الأصلية تلقائياً من Hugging Face ({hf_repo})..."
+    )
+    url = f"https://huggingface.co/{hf_repo}/resolve/main/pytorch_model.bin"
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = file_path.with_suffix(".download.tmp")
+
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    req = urllib.request.Request(url, headers=headers)
+
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp, open(temp_path, "wb") as out:
+            while True:
+                chunk = resp.read(1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+                
+        if temp_path.stat().st_size < min_size:
+            temp_path.unlink(missing_ok=True)
+            raise RuntimeError(f"حجم الملف المحمّل ({temp_path.stat().st_size}) أصغر من المتوقع ({min_size}).")
+            
+        temp_path.replace(file_path)
+        logger.info(f"تم تحميل وتثبيت أوزان Pyannote بنجاح: {file_path.name} ({file_path.stat().st_size} بايت)")
+    except Exception as exc:
+        temp_path.unlink(missing_ok=True)
+        if file_path.exists() and file_path.stat().st_size < min_size:
+            content_sample = ""
+            try:
+                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    content_sample = f.read(200).strip()
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"ملف أوزان Pyannote ({file_path.name}) هو ملف نصي لمؤشر Git LFS ({file_path.stat().st_size} بايت):\n"
+                f"{content_sample}\n"
+                f"وتعذر تحميل الأوزان الأصلية تلقائياً ({exc}). "
+                f"يرجى التأكد من استبدال هذا الملف بملف الأوزان الفعلي ({min_size // (1024*1024)}MB) أو تفعيل الاتصال بالإنترنت مؤقتاً."
+            ) from exc
+        raise
 
 
 # =============================================================================
@@ -76,6 +147,11 @@ def _get_or_create_local_pyannote_config() -> Path:
 
     seg_model = (pyannote_base / "segmentation-3.0" / "pytorch_model.bin").resolve()
     emb_model = (pyannote_base / "wespeaker-voxceleb-resnet34-LM" / "pytorch_model.bin").resolve()
+
+    hf_token = getattr(settings, "HF_TOKEN", None) or "REDACTED_HF_TOKEN"
+    # Ensure authentic PyTorch binaries (not Git-LFS pointer text files or partial files)
+    _ensure_valid_model_weight(seg_model, "pyannote/segmentation-3.0", min_size=5_000_000, token=hf_token)
+    _ensure_valid_model_weight(emb_model, "pyannote/wespeaker-voxceleb-resnet34-LM", min_size=25_000_000, token=hf_token)
 
     if not seg_model.exists() or not emb_model.exists():
         raise FileNotFoundError(f"أوزان نموذج Pyannote غير مكتملة في {pyannote_base}")

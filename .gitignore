@@ -41,6 +41,7 @@ models/*.onnx
 models/**/*.gguf
 models/**/*.bin
 models/**/*.safetensors
+!models/pyannote/**/pytorch_model.bin
 models/whisper-*
 models/pyannote/**/config_local.yaml
 **/config_local.yaml
