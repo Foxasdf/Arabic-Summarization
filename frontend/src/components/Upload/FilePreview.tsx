@@ -19,7 +19,7 @@ export const FilePreview: React.FC<FilePreviewProps> = ({
   uploadProgress = 0,
 }) => {
   const [numSpeakers, setNumSpeakers] = React.useState<number>(0);
-  const [asrModel, setAsrModel] = React.useState<string>('cohere-transcribe-arabic');
+  const [asrModel, setAsrModel] = React.useState<string>('audar-asr-v1-turbo');
   const [denoiseMode, setDenoiseMode] = React.useState<string>('none');
   const [isLocalSubmitting, setIsLocalSubmitting] = React.useState<boolean>(false);
 
@@ -107,20 +107,21 @@ export const FilePreview: React.FC<FilePreviewProps> = ({
             {[
               {
                 val: 'audar-asr-v1-turbo',
-                name: 'Audar ASR',
-                desc: 'الأعلى سرعة وتوافقاً',
+                name: 'Audar ASR (GPU)',
+                desc: 'الأعلى سرعة وتوافقاً (تسريع كرت الشاشة)',
+                badge: 'مُوصى به ⚡',
               },
               {
                 val: 'cohere-transcribe-arabic',
-                name: 'Cohere Transcribe',
-                desc: 'دقيق للهجات والخلط',
+                name: 'Cohere Transcribe (CPU)',
+                desc: 'دقيق للهجات والخلط (معالجة CPU)',
               },
               {
                 val: 'whisper-large-v3-turbo-arabic-dialectal',
                 name: 'Whisper Turbo',
                 desc: 'عالي الدقة للهجات',
               },
-            ].map(({ val, name, desc }) => (
+            ].map(({ val, name, desc, badge }) => (
               <button
                 key={val}
                 type="button"
@@ -134,10 +135,17 @@ export const FilePreview: React.FC<FilePreviewProps> = ({
                     : 'bg-white text-slate-700 border-slate-200 hover:border-slate-300'
                 }`}
               >
-                <div className="mb-1" dir="ltr" style={{ textAlign: 'right' }}>
+                <div className="mb-1 flex items-center justify-between gap-1" dir="rtl">
                   <span className="text-sm font-bold block leading-snug">
                     {name}
                   </span>
+                  {badge && (
+                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full whitespace-nowrap ${
+                      asrModel === val ? 'bg-indigo-500 text-white' : 'bg-emerald-100 text-emerald-800'
+                    }`}>
+                      {badge}
+                    </span>
+                  )}
                 </div>
                 <span
                   className={`text-xs block leading-normal ${

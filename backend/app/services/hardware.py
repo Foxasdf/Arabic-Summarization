@@ -114,8 +114,8 @@ class HardwareProfile:
         avail_vram = max(0.0, self.vram_free_gb - 2.0)
         if self.vram_total_gb >= 15.0 and avail_vram >= 8.5:
             return 4  # 24GB GPUs (RTX 3090, RTX 4090, A10G)
-        elif self.vram_total_gb >= 10.0 and avail_vram >= 5.0:
-            return 2  # Stable & fast 2x parallel speedup for 11GB - 12GB GPUs (RTX 2080 Ti)
+        elif self.vram_total_gb >= 10.0 and avail_vram >= 5.5:
+            return 3  # High-throughput 3x parallel speedup for 11GB - 12GB GPUs (RTX 2080 Ti, RTX 3060 12GB)
         elif self.vram_total_gb >= 7.5 and avail_vram >= 2.5:
             return 2  # 8GB GPUs (RTX 2070, RTX 2080, RTX 3070)
         return 1
@@ -136,16 +136,16 @@ class HardwareProfile:
             emb_batch = 32
         elif self.vram_total_gb >= 15.0 and self.vram_free_gb >= 8.0:
             # 24GB GPUs (RTX 3090, 4090, A10G)
-            seg_batch = 128
-            emb_batch = 96
+            seg_batch = 256
+            emb_batch = 128
         elif self.vram_total_gb >= 10.0 and self.vram_free_gb >= 4.0:
             # 11GB - 12GB GPUs (RTX 2080 Ti, RTX 3060 12GB, RTX 3080)
-            seg_batch = 128
-            emb_batch = 64
+            seg_batch = 192
+            emb_batch = 96
         elif self.vram_total_gb >= 7.5:
             # 8GB GPUs (RTX 2070, RTX 2080, RTX 3070)
-            seg_batch = 64
-            emb_batch = 32
+            seg_batch = 96
+            emb_batch = 48
         else:
             # Low VRAM (<= 6GB)
             seg_batch = 32

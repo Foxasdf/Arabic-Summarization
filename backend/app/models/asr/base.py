@@ -257,6 +257,12 @@ class BaseASREngine(BaseModelEngine):
 
                     slice_paths.append(slice_wav if slice_created else None)
 
+                # Release master audio array from RAM immediately before starting ASR inference
+                del audio_data
+                audio_data = None
+                import gc
+                gc.collect()
+
                 results: List[str] = [""] * len(slice_info)
                 completed_count = 0
 
@@ -283,6 +289,11 @@ class BaseASREngine(BaseModelEngine):
                                     logger.error(f"Fallback slice {idx} transcription also failed: {fallback_err}")
                                     return idx, ""
                         finally:
+                            if p and p.exists():
+                                try:
+                                    p.unlink()
+                                except OSError:
+                                    pass
                             engine_q.put(worker_eng)
 
                     with ThreadPoolExecutor(max_workers=actual_workers) as executor:
@@ -297,6 +308,14 @@ class BaseASREngine(BaseModelEngine):
                             except Exception as fut_err:
                                 logger.error(f"Error retrieving slice transcription from parallel future: {fut_err}")
                             completed_count += 1
+                            if completed_count % 25 == 0:
+                                gc.collect()
+                                try:
+                                    import torch
+                                    if torch.cuda.is_available():
+                                        torch.cuda.empty_cache()
+                                except Exception:
+                                    pass
                             if on_progress:
                                 pct = int(lo + (completed_count / max(1, len(slice_info))) * (hi - lo))
                                 tot_sec = int(round(total_duration))
@@ -311,13 +330,25 @@ class BaseASREngine(BaseModelEngine):
                         dur = item["dur"]
                         if p is not None and p.exists():
                             results[idx] = self.transcribe_slice(p, dur_sec=dur)
+                            try:
+                                p.unlink()
+                            except OSError:
+                                pass
                         completed_count += 1
+                        if completed_count % 25 == 0:
+                            gc.collect()
+                            try:
+                                import torch
+                                if torch.cuda.is_available():
+                                    torch.cuda.empty_cache()
+                            except Exception:
+                                pass
                         if on_progress:
                             pct = int(lo + (completed_count / max(1, len(slice_info))) * (hi - lo))
                             tot_sec = int(round(total_duration))
                             on_progress(pct, f"تم تفريغ المقطع {completed_count} من {len(slice_info)} ({int(round(item['start']))}/{tot_sec} ث)...")
 
-                # Clean up temporary slice audio files
+                # Clean up any remaining temporary slice audio files
                 for sp in slice_paths:
                     if sp and sp.exists():
                         try:

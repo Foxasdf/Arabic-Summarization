@@ -259,6 +259,15 @@ class CohereASREngine(BaseASREngine):
             resp = json.loads(resp_line)
             raw_text = resp.get("text", "") or ""
             raw_text = raw_text.replace("@@@فراغ", "").strip()
+
+            # Worker Process Recycling:
+            # Every 25 slices, recycle the worker subprocess to release all OS heap memory back to Linux
+            self._slice_count = getattr(self, "_slice_count", 0) + 1
+            if self._slice_count % 25 == 0:
+                logger.info(f"Recycling Cohere worker process after {self._slice_count} slices to prevent memory accumulation...")
+                self.unload()
+                self.load()
+
             return raw_text
         except Exception as e:
             logger.warning(f"Error during Cohere slice transcription via worker: {e}")

@@ -23,7 +23,7 @@ function App() {
   const [fileId, setFileId] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [numSpeakers, setNumSpeakers] = useState<number | undefined>(undefined);
-  const [selectedAsrModel, setSelectedAsrModel] = useState<string>('cohere-transcribe-arabic');
+  const [selectedAsrModel, setSelectedAsrModel] = useState<string>('audar-asr-v1-turbo');
   const [selectedDenoiseMode, setSelectedDenoiseMode] = useState<string>('none');
   const [isUploading, setIsUploading] = useState<boolean>(false);
   const [uploadProgress, setUploadProgress] = useState<number>(0);
@@ -57,7 +57,7 @@ function App() {
     setFileId(null);
     setSelectedFile(null);
     setNumSpeakers(undefined);
-    setSelectedAsrModel('cohere-transcribe-arabic');
+    setSelectedAsrModel('audar-asr-v1-turbo');
     setSelectedDenoiseMode('none');
     setIsUploading(false);
     setUploadProgress(0);

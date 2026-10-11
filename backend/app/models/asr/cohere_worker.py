@@ -67,6 +67,7 @@ def main():
     }) + "\n")
     sys.stdout.flush()
 
+    slice_count = 0
     # Request loop via stdin
     for line in iter(sys.stdin.readline, ""):
         line = line.strip()
@@ -86,6 +87,9 @@ def main():
             continue
         elif cmd == "transcribe_slice":
             slice_path = req.get("path")
+            raw_audio = None
+            audio_f32 = None
+            res = None
             try:
                 sr, raw_audio = wavfile.read(slice_path)
                 if raw_audio.dtype == np.int16:
@@ -115,6 +119,15 @@ def main():
             except Exception as e:
                 sys.stdout.write(json.dumps({"status": "error", "message": str(e), "text": ""}) + "\n")
                 sys.stdout.flush()
+            finally:
+                # Explicit cleanup of large audio arrays to prevent memory creep across hundreds of slices
+                raw_audio = None
+                audio_f32 = None
+                res = None
+                slice_count += 1
+                if slice_count % 15 == 0:
+                    import gc
+                    gc.collect()
 
     try:
         if hasattr(model, "close"):
