@@ -3,28 +3,73 @@ import { Meeting, ModelInfo, ProcessingStatus, TranscriptSegment, ChatResponse, 
 const API_BASE = '/api';
 
 export const api = {
-  async uploadAudio(file: File): Promise<{ file_id: string; filename: string; duration_seconds: number; estimated_minutes: number }> {
-    const formData = new FormData();
-    formData.append('file', file);
-    
-    const response = await fetch(`${API_BASE}/upload`, {
-      method: 'POST',
-      body: formData,
+  uploadAudio(
+    file: File,
+    onProgress?: (percent: number) => void
+  ): Promise<{ file_id: string; filename: string; duration_seconds: number; estimated_minutes: number }> {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      const formData = new FormData();
+      formData.append('file', file);
+
+      xhr.open('POST', `${API_BASE}/upload`);
+
+      if (xhr.upload && onProgress) {
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable) {
+            const percent = Math.round((event.loaded / event.total) * 100);
+            onProgress(percent);
+          }
+        };
+      }
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText));
+          } catch {
+            reject(new Error('استجابة غير صحيحة من الخادم'));
+          }
+        } else {
+          try {
+            const errData = JSON.parse(xhr.responseText);
+            reject(new Error(errData?.detail || `فشل رفع الملف (${xhr.status})`));
+          } catch {
+            reject(new Error(`فشل رفع الملف (${xhr.status})`));
+          }
+        }
+      };
+
+      xhr.onerror = () => reject(new Error('فشل الاتصال بالخادم أثناء رفع الملف'));
+      xhr.ontimeout = () => reject(new Error('انتهت مهلة رفع الملف'));
+
+      xhr.send(formData);
     });
-    
-    if (!response.ok) {
-      const errData = await response.json().catch(() => null);
-      throw new Error(errData?.detail || `فشل رفع الملف: ${response.statusText}`);
-    }
-    
-    return response.json();
   },
 
-  transcribe(fileId: string, onProgress: (status: ProcessingStatus) => void): Promise<TranscriptSegment[]> {
+  transcribe(
+    fileId: string,
+    onProgress: (status: ProcessingStatus) => void,
+    numSpeakers?: number,
+    denoiseMode?: string,
+    asrModel?: string
+  ): Promise<TranscriptSegment[]> {
     return new Promise((resolve, reject) => {
-      const eventSource = new EventSource(`${API_BASE}/transcribe/${fileId}`);
+      const params = new URLSearchParams();
+      if (numSpeakers) params.append('num_speakers', numSpeakers.toString());
+      if (denoiseMode) params.append('denoise_mode', denoiseMode);
+      if (asrModel) params.append('asr_model', asrModel);
+      const qs = params.toString();
+      const url = qs ? `${API_BASE}/transcribe/${fileId}?${qs}` : `${API_BASE}/transcribe/${fileId}`;
+      const eventSource = new EventSource(url);
       
+      let errorTimer: ReturnType<typeof setTimeout> | null = null;
+
       eventSource.onmessage = (event) => {
+        if (errorTimer) {
+          clearTimeout(errorTimer);
+          errorTimer = null;
+        }
         try {
           const data: ProcessingStatus = JSON.parse(event.data);
           onProgress(data);
@@ -46,6 +91,18 @@ export const api = {
       };
       
       eventSource.onerror = () => {
+        if (eventSource.readyState === EventSource.CONNECTING) {
+          if (!errorTimer) {
+            errorTimer = setTimeout(() => {
+              if (eventSource.readyState !== EventSource.OPEN) {
+                eventSource.close();
+                reject(new Error('انقطع الاتصال بخادم المعالجة'));
+              }
+            }, 15000);
+          }
+          return;
+        }
+        if (errorTimer) clearTimeout(errorTimer);
         eventSource.close();
         reject(new Error('فشل الاتصال بخادم المعالجة'));
       };

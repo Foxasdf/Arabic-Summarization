@@ -93,9 +93,9 @@ def _clean_summary_markdown(text: str) -> str:
     ]
     for pat, rep in fixes:
         text = re.sub(pat, rep, text)
-    # Filter any stray CJK characters occasionally emitted by multilingual vocab
+    # Filter any stray CJK/Cyrillic characters occasionally emitted by multilingual vocab
     text = re.sub(
-        r"[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff\u3040-\u30ff\u31f0-\u31ff\u2e80-\u2eff\u3000-\u303f\uff00-\uffef]+",
+        r"[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff\u3040-\u30ff\u31f0-\u31ff\u2e80-\u2eff\u3000-\u303f\uff00-\uffef\u0400-\u04ff]+",
         "",
         text,
     )

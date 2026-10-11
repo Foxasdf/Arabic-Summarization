@@ -1,7 +1,7 @@
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Optional, Callable, Union
 import logging
-from ..models.asr_engine import ASREngine
+from ..models.asr import get_asr_engine, BaseASREngine
 from ..models.registry import registry
 from ..config import settings
 
@@ -12,6 +12,7 @@ def transcribe_audio(
     on_progress: Optional[Callable[[int, str], None]] = None,
     max_duration_seconds: Optional[float] = None,
     progress_range: tuple = (25, 92),
+    model_identifier: Optional[Union[str, Path]] = None,
 ) -> dict:
     model_filename = settings.ASR_GGUF_FILENAME
     model_path = settings.MODELS_DIR / model_filename
@@ -24,7 +25,10 @@ def transcribe_audio(
                 break
 
     mmproj_path = settings.MODELS_DIR / settings.ASR_MMPROJ_FILENAME
-    engine = ASREngine(model_path, mmproj_path=mmproj_path if mmproj_path.exists() else None)
+    engine = get_asr_engine(
+        model_identifier or model_path,
+        mmproj_path=mmproj_path if mmproj_path.exists() else None
+    )
     try:
         engine.load()
         return engine.transcribe(
@@ -40,13 +44,21 @@ def transcribe_with_speakers(
     audio_path: Path,
     turns: list,
     on_progress: Optional[Callable[[int, str], None]] = None,
+    model_identifier: Optional[Union[str, Path]] = None,
 ) -> list:
-    """Diarization-driven ASR: one Audar pass per speaker turn."""
-    model_path = settings.MODELS_DIR / settings.ASR_GGUF_FILENAME
-    mmproj_path = settings.MODELS_DIR / settings.ASR_MMPROJ_FILENAME
-    engine = ASREngine(model_path, mmproj_path=mmproj_path if mmproj_path.exists() else None)
-    try:
-        engine.load()
-        return engine.transcribe_turns(audio_path, turns, on_progress=on_progress)
-    finally:
-        engine.unload()
+    """
+    High-accuracy full-coverage ASR with Pyannote speaker alignment:
+    transcribes continuous speech to guarantee 0% word loss, then aligns
+    word and clause timestamps to Pyannote speaker turns.
+    """
+    from .alignment import align_timestamps
+
+    asr_res = transcribe_audio(
+        audio_path,
+        on_progress=on_progress,
+        model_identifier=model_identifier,
+        progress_range=(25, 92),
+    )
+    words = asr_res.get("words", []) if asr_res else []
+    return align_timestamps(words, turns)
+

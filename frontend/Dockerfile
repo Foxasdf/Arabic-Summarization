@@ -1,10 +1,11 @@
 # Stage 1: Build React app
-FROM node:18-alpine AS build
+FROM node:20-slim AS build
 
 WORKDIR /app
 
-COPY package*.json ./
-RUN npm ci
+# نسخ package.json وتثبيت الحزم بالكامل
+COPY package.json ./
+RUN npm install
 
 COPY . .
 RUN npm run build

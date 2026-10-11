@@ -95,6 +95,41 @@ class TestArabicSummarizerCore(unittest.TestCase):
         for a, b in zip(reported[:-1], reported[1:]):
             self.assertLessEqual(a, b)
 
+    def test_plan_windows_preserves_short_turns(self):
+        from app.models.asr_engine import ASREngine
+        turns = [
+            {"speaker": "SPEAKER_00", "start": 0.0, "end": 10.0},
+            {"speaker": "SPEAKER_01", "start": 10.2, "end": 10.5},  # 0.3s short response (نعم)
+            {"speaker": "SPEAKER_00", "start": 10.6, "end": 15.0},
+        ]
+        windows = ASREngine.plan_windows(turns)
+        self.assertEqual(len(windows), 3)
+        self.assertEqual(windows[1]["speaker"], "SPEAKER_01")
+        self.assertEqual(windows[1]["start"], 10.2)
+        self.assertEqual(windows[1]["end"], 10.5)
+
+    def test_plan_windows_splits_long_turns(self):
+        from app.models.asr_engine import ASREngine
+        turns = [
+            {"speaker": "SPEAKER_00", "start": 0.0, "end": 60.0},  # 60s turn -> 3 windows of 20s
+        ]
+        windows = ASREngine.plan_windows(turns, max_len=25.0)
+        self.assertEqual(len(windows), 3)
+        self.assertTrue(all(w["speaker"] == "SPEAKER_00" for w in windows))
+    def test_plan_windows_merges_consecutive_same_speaker_turns(self):
+        from app.models.asr_engine import ASREngine
+        turns = [
+            {"speaker": "SPEAKER_00", "start": 0.0, "end": 4.0},
+            {"speaker": "SPEAKER_00", "start": 5.0, "end": 9.0},  # Same speaker with 1s pause
+            {"speaker": "SPEAKER_00", "start": 10.0, "end": 14.0}, # Same speaker with 1s pause
+        ]
+        windows = ASREngine.plan_windows(turns, max_len=24.0)
+        # Should merge all 3 into a single window of 0.0 to 14.0
+        self.assertEqual(len(windows), 1)
+        self.assertEqual(windows[0]["speaker"], "SPEAKER_00")
+        self.assertEqual(windows[0]["start"], 0.0)
+        self.assertEqual(windows[0]["end"], 14.0)
+
 
 if __name__ == "__main__":
     unittest.main()

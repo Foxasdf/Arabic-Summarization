@@ -5,23 +5,42 @@ import { CheckCircle2, Circle, Loader2, FileAudio, Type, Users, Sparkles } from 
 
 interface ProcessingViewProps {
   fileId: string;
+  numSpeakers?: number;
+  asrModel?: string;
+  denoiseMode?: string;
   onComplete: () => void;
 }
 
-const STEPS = [
-  { id: 'preprocessing', label: 'معالجة وتجهيز الملف الصوتي', icon: FileAudio },
-  { id: 'diarization', label: 'فصل وتحديد المتحدثين', icon: Users },
-  { id: 'asr', label: 'تحويل الصوت إلى نص (Audar ASR)', icon: Type },
-  { id: 'alignment', label: 'مطابقة النتائج وحفظ الاجتماع', icon: Sparkles },
-];
-
-export const ProcessingView: React.FC<ProcessingViewProps> = ({ fileId, onComplete }) => {
+export const ProcessingView: React.FC<ProcessingViewProps> = ({ fileId, numSpeakers, asrModel, denoiseMode, onComplete }) => {
   const { status, result, error, startTranscription } = useTranscription();
   const [maxProgress, setMaxProgress] = useState(0);
 
+  const asrLabel = 
+    asrModel?.includes('cohere') ? 'Cohere Transcribe' :
+    (asrModel?.includes('whisper') || asrModel?.includes('dialectal')) ? 'Whisper Turbo' :
+    'Audar ASR';
+
+  const isNoDenoise = denoiseMode === 'none' || denoiseMode === 'off' || denoiseMode === 'لا معالجة';
+  const denoiseLabel =
+    isNoDenoise ? 'بدون معالجة' :
+    denoiseMode === 'low' ? 'منخفضة' :
+    denoiseMode === 'moderate' ? 'متوسطة' :
+    denoiseMode === 'high' ? 'عالية' : 'ديناميكي';
+
+  const STEPS = [
+    { 
+      id: 'preprocessing', 
+      label: isNoDenoise ? 'تجهيز الملف الصوتي (بدون معالجة)' : `تنقية الصوت (${denoiseLabel}) وتجهيزه`, 
+      icon: FileAudio 
+    },
+    { id: 'diarization', label: 'فصل وتحديد المتحدثين', icon: Users },
+    { id: 'asr', label: `تحويل الصوت إلى نص (${asrLabel})`, icon: Type },
+    { id: 'alignment', label: 'مطابقة النتائج وحفظ الاجتماع', icon: Sparkles },
+  ];
+
   useEffect(() => {
-    startTranscription(fileId);
-  }, [fileId, startTranscription]);
+    startTranscription(fileId, numSpeakers, denoiseMode, asrModel);
+  }, [fileId, numSpeakers, denoiseMode, asrModel, startTranscription]);
 
   useEffect(() => {
     if (result) {
@@ -48,7 +67,7 @@ export const ProcessingView: React.FC<ProcessingViewProps> = ({ fileId, onComple
         <button 
           onClick={() => {
             setMaxProgress(0);
-            startTranscription(fileId);
+            startTranscription(fileId, numSpeakers, denoiseMode, asrModel);
           }}
           className="mt-6 bg-rose-600 hover:bg-rose-700 text-white px-6 py-2 rounded-lg font-medium transition-colors cursor-pointer"
         >

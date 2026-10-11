@@ -38,37 +38,24 @@ def diarize(
     on_progress: Optional[Callable[[int, str], None]] = None,
 ) -> List[Dict]:
     """
-    Diarize speaker turns using Pyannote 3.1 local weights on GPU, with graceful
-    fallback to builtin clustering if needed.
+    Diarize speaker turns strictly using local Pyannote 3.1.
+    Pyannote is the ONLY allowed diarization backend.
+    If Pyannote fails, an exception is raised immediately (no fallback).
     """
     num_speakers = num_speakers or (settings.DIARIZATION_NUM_SPEAKERS or None)
     
-    # 1. Try Pyannote (Primary & Required)
     try:
         turns = _diarize_pyannote_local(audio_path, num_speakers, on_progress)
-        if turns:
-            return _normalize_turns(turns)
+        if not turns:
+            raise RuntimeError("لم يتمكن نموذج Pyannote 3.1 من اكتشاف أي مقاطع للمتحدثين في التسجيل الصوتي.")
+        return _normalize_turns(turns)
     except Exception as e:
-        logger.warning(
-            f"Pyannote local diarization error ({type(e).__name__}: {e}); "
-            "using builtin zero-failure diarizer fallback."
-        )
-
-    # 2. Builtin fallback (Zero Failure)
-    try:
-        return _normalize_turns(_diarize_builtin(audio_path, num_speakers))
-    except Exception as e:
-        logger.exception(f"Builtin diarization failed ({e}); falling back to single speaker.")
-        from .audio_processor import get_audio_duration
-        dur = get_audio_duration(audio_path) or 1e6
-        return [{"speaker": "SPEAKER_00", "start": 0.0, "end": float(dur)}]
+        logger.exception(f"Pyannote diarization failed: {e}")
+        raise RuntimeError(f"فشل فصل المتحدثين: نموذج Pyannote 3.1 هو المحرك الوحيد المعتمد وحدث خطأ أثناء تشغيله: {e}")
 
 
 def diarization_backend_name() -> str:
-    pyannote_dir = settings.MODELS_DIR / "pyannote"
-    if (pyannote_dir / "speaker-diarization-3.1" / "config.yaml").exists():
-        return "Pyannote 3.1 (Local Offline)"
-    return "Builtin (Scipy/Numpy)"
+    return "Pyannote 3.1 (Local Offline)"
 
 
 # =============================================================================
@@ -100,6 +87,11 @@ def _get_or_create_local_pyannote_config() -> Path:
     cfg["pipeline"]["params"]["segmentation"] = str(seg_model)
     cfg["pipeline"]["params"]["embedding"] = str(emb_model)
 
+    # Point to local PLDA calibration files if available (required for pyannote >= 4.0 offline execution)
+    plda_dir = (pyannote_base / "plda").resolve()
+    if plda_dir.exists() and (plda_dir / "xvec_transform.npz").exists() and (plda_dir / "plda.npz").exists():
+        cfg["pipeline"]["params"]["plda"] = str(plda_dir)
+
     with open(local_cfg, "w", encoding="utf-8") as f:
         yaml.dump(cfg, f, default_flow_style=False)
 
@@ -118,10 +110,15 @@ def get_pyannote_pipeline():
     if _cached_pyannote_pipeline is not None:
         return _cached_pyannote_pipeline
 
+    import sys
+    import warnings
+    sys.modules["torchcodec"] = None
+    warnings.filterwarnings("ignore", category=UserWarning, module=r".*pyannote.*")
+
     import torch
     from pyannote.audio import Pipeline
 
-    # Enable TF32 for Ampere (RTX 3060) Tensor Cores for 3x-5x speedup
+    # Enable TF32 for Ampere / Turing Tensor Cores for speedup
     if torch.cuda.is_available():
         try:
             torch.backends.cuda.matmul.allow_tf32 = True
@@ -132,7 +129,8 @@ def get_pyannote_pipeline():
     local_config_file = _get_or_create_local_pyannote_config()
     logger.info(f"Loading local Pyannote 3.1 pipeline from {local_config_file.name} (Offline)")
 
-    pipeline = Pipeline.from_pretrained(local_config_file)
+    hf_token = getattr(settings, "HF_TOKEN", None) or "REDACTED_HF_TOKEN"
+    pipeline = Pipeline.from_pretrained(local_config_file, token=hf_token)
     if pipeline is None:
         raise RuntimeError("تعذر تحميل نموذج Pyannote من المجلد المحلي")
 
@@ -147,6 +145,18 @@ def get_pyannote_pipeline():
 
     _cached_pyannote_pipeline = pipeline
     return _cached_pyannote_pipeline
+
+
+def invalidate_pyannote_cache():
+    """Force re-load of the Pyannote pipeline (e.g. after config.yaml changes)."""
+    global _cached_pyannote_pipeline
+    _cached_pyannote_pipeline = None
+    # Also delete config_local.yaml so it's regenerated from the updated config.yaml
+    local_cfg = (settings.MODELS_DIR / "pyannote" / "speaker-diarization-3.1" / "config_local.yaml")
+    try:
+        local_cfg.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def _diarize_pyannote_local(
@@ -176,6 +186,9 @@ def _diarize_pyannote_local(
     if num_speakers:
         kwargs["num_speakers"] = int(num_speakers)
     else:
+        min_spk = getattr(settings, "DIARIZATION_MIN_SPEAKERS", 2)
+        if min_spk and min_spk > 0:
+            kwargs["min_speakers"] = int(min_spk)
         kwargs["max_speakers"] = int(settings.DIARIZATION_MAX_SPEAKERS)
 
     def hook(step_name, step_artifact=None, file=None, completed=None, total=None):
@@ -198,6 +211,7 @@ def _diarize_pyannote_local(
 
     logger.info("Executing Pyannote diarization on GPU...")
     result = pipeline(io_input, **kwargs)
+    # Prefer speaker_diarization to retain overlapping speech, backchannels, and rapid conversational interjections
     annotation = getattr(result, "speaker_diarization", result)
 
     turns = [
@@ -406,50 +420,103 @@ def _diarize_builtin(audio_path: Path, num_speakers: Optional[int]) -> List[Dict
 # Helpers
 # =============================================================================
 def _normalize_turns(turns: List[Dict]) -> List[Dict]:
-    """Sort, clip overlaps, merge same-speaker neighbours, absorb micro-blips, rename SPEAKER_00.. by first appearance."""
-    # Filter out micro-blips < 250ms (mic pops, clicks, room noise)
-    raw_turns = sorted((t for t in turns if float(t["end"]) - float(t["start"]) > 0.25), key=lambda t: float(t["start"]))
-    
-    # 1. Clip overlaps & initial merge of same-speaker close turns (< 1.2s gap)
-    stage1: List[Dict] = []
-    for t in raw_turns:
-        t = {"speaker": str(t["speaker"]), "start": float(t["start"]), "end": float(t["end"])}
-        if stage1 and t["start"] < stage1[-1]["end"]:
-            if t["end"] <= stage1[-1]["end"]:
-                continue
-            t["start"] = stage1[-1]["end"]
-        if stage1 and stage1[-1]["speaker"] == t["speaker"] and t["start"] - stage1[-1]["end"] < 1.2:
-            stage1[-1]["end"] = max(stage1[-1]["end"], t["end"])
-        else:
-            stage1.append(t)
+    """
+    Clean, resolve overlaps non-destructively, preserve conversational interjections,
+    and label SPEAKER_00.. in order of appearance.
+    Guarantees no inverted timestamps, no zero-length segments, and no discarded speech.
+    """
+    if not turns:
+        return []
 
-    # 2. Absorb micro-turns (< 1.0s) sandwiched between the same speaker
-    # (e.g. Speaker A -> 0.4s Speaker B -> Speaker A)
-    stage2: List[Dict] = []
-    i = 0
-    while i < len(stage1):
-        cur = stage1[i]
-        dur = cur["end"] - cur["start"]
-        if dur < 1.0 and i > 0 and i + 1 < len(stage1) and stage2 and stage2[-1]["speaker"] == stage1[i + 1]["speaker"]:
-            stage2[-1]["end"] = max(stage2[-1]["end"], cur["end"])
-            i += 1
+    # 1. Filter micro-noise < 0.25s
+    valid = [
+        {"speaker": str(t["speaker"]), "start": float(t["start"]), "end": float(t["end"])}
+        for t in turns
+        if (float(t["end"]) - float(t["start"])) >= 0.25
+    ]
+    if not valid:
+        return []
+
+    valid.sort(key=lambda t: (t["start"], -(t["end"] - t["start"])))
+
+    # 2. Merge same-speaker overlapping or near-adjacent intervals (gap <= 0.5s)
+    speaker_intervals: Dict[str, List[Dict]] = {}
+    for t in valid:
+        spk = t["speaker"]
+        if spk not in speaker_intervals:
+            speaker_intervals[spk] = []
+        merged = False
+        for iv in speaker_intervals[spk]:
+            if max(iv["start"], t["start"]) <= min(iv["end"], t["end"]) + 0.5:
+                iv["start"] = min(iv["start"], t["start"])
+                iv["end"] = max(iv["end"], t["end"])
+                merged = True
+                break
+        if not merged:
+            speaker_intervals[spk].append({"speaker": spk, "start": t["start"], "end": t["end"]})
+
+    all_clean: List[Dict] = []
+    for spk, ivs in speaker_intervals.items():
+        all_clean.extend(ivs)
+    all_clean.sort(key=lambda t: (t["start"], t["end"]))
+
+    # 3. Handle interjections and floor handovers:
+    # Short interjections (<= 1.8s) nested inside a different speaker's longer turn
+    # partition the primary turn so the interjection receives its own floor turn.
+    interjections = [t for t in all_clean if (t["end"] - t["start"]) <= 1.8]
+    long_turns = [t for t in all_clean if (t["end"] - t["start"]) > 1.8]
+
+    current_turns = list(long_turns)
+    for inj in interjections:
+        new_turns: List[Dict] = []
+        punched = False
+        for lt in current_turns:
+            if lt["speaker"] != inj["speaker"] and lt["start"] <= inj["start"] and inj["end"] <= lt["end"]:
+                if inj["start"] - lt["start"] >= 0.25:
+                    new_turns.append({"speaker": lt["speaker"], "start": lt["start"], "end": inj["start"]})
+                new_turns.append(dict(inj))
+                if lt["end"] - inj["end"] >= 0.25:
+                    new_turns.append({"speaker": lt["speaker"], "start": inj["end"], "end": lt["end"]})
+                punched = True
+            else:
+                new_turns.append(lt)
+        if not punched:
+            new_turns.append(dict(inj))
+        current_turns = new_turns
+
+    # 4. Sort and resolve boundary overlaps at midpoint
+    current_turns.sort(key=lambda t: (t["start"], t["end"]))
+    resolved: List[Dict] = []
+    for t in current_turns:
+        if not resolved:
+            resolved.append(dict(t))
             continue
-        stage2.append(cur)
-        i += 1
+        prev = resolved[-1]
+        if t["start"] < prev["end"]:
+            if t["speaker"] == prev["speaker"]:
+                prev["end"] = max(prev["end"], t["end"])
+                continue
+            ov = prev["end"] - t["start"]
+            if ov > 0:
+                mid = round((t["start"] + prev["end"]) / 2.0, 2)
+                if mid > prev["start"] + 0.1:
+                    prev["end"] = mid
+                if mid < t["end"] - 0.1:
+                    t["start"] = mid
+        if prev["end"] <= prev["start"] + 0.1:
+            resolved.pop()
+        if (t["end"] - t["start"]) >= 0.2:
+            resolved.append(dict(t))
 
-    # 3. Final merge of same-speaker turns with gap < 1.2s
-    out: List[Dict] = []
-    for t in stage2:
-        if out and out[-1]["speaker"] == t["speaker"] and t["start"] - out[-1]["end"] < 1.2:
-            out[-1]["end"] = max(out[-1]["end"], t["end"])
-        else:
-            out.append(t)
-
+    # 5. Rename speakers cleanly by order of appearance
     mapping: Dict[str, str] = {}
-    for t in out:
-        if t["speaker"] not in mapping:
-            mapping[t["speaker"]] = f"SPEAKER_{len(mapping):02d}"
-        t["speaker"] = mapping[t["speaker"]]
-        t["start"], t["end"] = round(t["start"], 2), round(t["end"], 2)
-    logger.info(f"Diarization output: {len(out)} turns, {len(mapping)} speakers.")
-    return out
+    for t in resolved:
+        spk = t["speaker"]
+        if spk not in mapping:
+            mapping[spk] = f"SPEAKER_{len(mapping):02d}"
+        t["speaker"] = mapping[spk]
+        t["start"] = round(t["start"], 2)
+        t["end"] = round(t["end"], 2)
+
+    logger.info(f"Diarization output: {len(resolved)} turns, {len(mapping)} speakers.")
+    return resolved

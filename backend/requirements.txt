@@ -4,6 +4,10 @@ uvicorn[standard]
 python-multipart
 pydantic-settings
 llama-cpp-python>=0.3.16
+transcribe-cpp>=0.3.1
+faster-whisper>=1.0.0
+ctranslate2>=4.0.0
+transformers>=4.40.0
 numpy
 scipy
 imageio-ffmpeg

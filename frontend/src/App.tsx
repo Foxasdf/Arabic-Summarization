@@ -22,6 +22,11 @@ function App() {
   const [currentMeeting, setCurrentMeeting] = useState<Meeting | null>(null);
   const [fileId, setFileId] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [numSpeakers, setNumSpeakers] = useState<number | undefined>(undefined);
+  const [selectedAsrModel, setSelectedAsrModel] = useState<string>('cohere-transcribe-arabic');
+  const [selectedDenoiseMode, setSelectedDenoiseMode] = useState<string>('none');
+  const [isUploading, setIsUploading] = useState<boolean>(false);
+  const [uploadProgress, setUploadProgress] = useState<number>(0);
   const [meetingToDelete, setMeetingToDelete] = useState<{ id: string; filename: string } | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
 
@@ -51,6 +56,11 @@ function App() {
     setCurrentMeeting(null);
     setFileId(null);
     setSelectedFile(null);
+    setNumSpeakers(undefined);
+    setSelectedAsrModel('cohere-transcribe-arabic');
+    setSelectedDenoiseMode('none');
+    setIsUploading(false);
+    setUploadProgress(0);
   };
 
   const handleSelectMeeting = (id: string) => {
@@ -64,22 +74,37 @@ function App() {
 
   const handleFileSelect = (file: File) => {
     setSelectedFile(file);
+    setIsUploading(false);
+    setUploadProgress(0);
   };
 
-  const handleUploadStart = async () => {
-    if (!selectedFile) return;
+  const handleUploadStart = async (selectedNumSpeakers?: number, asrModel?: string, denoiseMode?: string) => {
+    if (!selectedFile || isUploading) return;
     try {
-      const res = await api.uploadAudio(selectedFile);
+      setIsUploading(true);
+      setUploadProgress(0);
+      setNumSpeakers(selectedNumSpeakers);
+      if (asrModel) setSelectedAsrModel(asrModel);
+      if (denoiseMode) setSelectedDenoiseMode(denoiseMode);
+      const res = await api.uploadAudio(selectedFile, (percent) => {
+        setUploadProgress(percent);
+      });
       setFileId(res.file_id);
       setView('processing');
-    } catch (error) {
+    } catch (error: any) {
       console.error("Upload failed", error);
-      alert("فشل رفع الملف");
+      alert(error?.message || "فشل رفع الملف، يرجى المحاولة مرة أخرى.");
+    } finally {
+      setIsUploading(false);
+      setUploadProgress(0);
     }
   };
 
   const handleCancelUpload = () => {
+    if (isUploading) return;
     setSelectedFile(null);
+    setIsUploading(false);
+    setUploadProgress(0);
   };
 
   const handleTranscriptionComplete = async () => {
@@ -183,7 +208,9 @@ function App() {
                   <FilePreview 
                     file={selectedFile} 
                     onUpload={handleUploadStart} 
-                    onCancel={handleCancelUpload} 
+                    onCancel={handleCancelUpload}
+                    isUploading={isUploading}
+                    uploadProgress={uploadProgress}
                   />
                 </div>
               )}
@@ -191,7 +218,10 @@ function App() {
               {view === 'processing' && fileId && (
                 <div className="flex-1 flex flex-col justify-center max-w-2xl mx-auto w-full">
                   <ProcessingView 
-                    fileId={fileId} 
+                    fileId={fileId}
+                    numSpeakers={numSpeakers}
+                    asrModel={selectedAsrModel}
+                    denoiseMode={selectedDenoiseMode}
                     onComplete={handleTranscriptionComplete} 
                   />
                 </div>

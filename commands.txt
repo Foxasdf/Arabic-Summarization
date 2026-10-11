@@ -19,7 +19,7 @@ nvidia-smi
 
 ./run.sh
 -----------
-sudo ufw allow 8000/tcp
+sudo ufw allow 3011/tcp
 -----------
 cd frontend
 npm install

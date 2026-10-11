@@ -45,7 +45,16 @@ MODELS = [
         "size_str": "3.88 GB",
         "url": "https://huggingface.co/unsloth/Falcon-H1-7B-Instruct-GGUF/resolve/main/Falcon-H1-7B-Instruct-IQ4_XS.gguf",
     },
+    {
+        "repo": "handy-computer/cohere-transcribe-arabic-07-2026-gguf",
+        "filename": "cohere-transcribe-arabic-07-2026-Q5_K_M.gguf",
+        "description": "نموذج كوهير لتفريغ الصوت واللهجات العربية (Cohere Transcribe Arabic Q5_K_M GGUF)",
+        "expected_size": 1770270112,
+        "size_str": "1.65 GB",
+        "url": "https://huggingface.co/handy-computer/cohere-transcribe-arabic-07-2026-gguf/resolve/main/cohere-transcribe-arabic-07-2026-Q5_K_M.gguf",
+    },
 ]
+
 
 
 def check_models():
@@ -172,21 +181,45 @@ def check_and_download_pyannote(token: str = DEFAULT_HF_TOKEN):
     seg = pyannote_base / "segmentation-3.0" / "pytorch_model.bin"
     emb = pyannote_base / "wespeaker-voxceleb-resnet34-LM" / "pytorch_model.bin"
     cfg = pyannote_base / "speaker-diarization-3.1" / "config.yaml"
-    
-    if seg.exists() and emb.exists() and cfg.exists():
-        print("✅ [مكتمل] نموذج فصل المتحدثين Pyannote 3.1 متوفر محلياً (100% Offline)")
+    plda_dir = pyannote_base / "plda"
+    plda_1 = plda_dir / "plda.npz"
+    plda_2 = plda_dir / "xvec_transform.npz"
+
+    if seg.exists() and emb.exists() and cfg.exists() and plda_1.exists() and plda_2.exists():
+        print("✅ [مكتمل] نموذج فصل المتحدثين Pyannote 3.1 مع معايرة PLDA متوفر محلياً (100% Offline)")
         return True
 
-    print("⬇️ جاري تحميل أوزان نموذج Pyannote 3.1 محلياً...")
+    print("⬇️ جاري تحميل أوزان نموذج Pyannote 3.1 وملفات المعايرة محلياً...")
     try:
-        from huggingface_hub import snapshot_download
-        snapshot_download('pyannote/speaker-diarization-3.1', local_dir=pyannote_base / 'speaker-diarization-3.1', token=token)
-        snapshot_download('pyannote/segmentation-3.0', local_dir=pyannote_base / 'segmentation-3.0', token=token)
-        snapshot_download('pyannote/wespeaker-voxceleb-resnet34-LM', local_dir=pyannote_base / 'wespeaker-voxceleb-resnet34-LM', token=token)
-        print("✅ تم تحميل نموذج Pyannote 3.1 محلياً بنجاح!")
+        from huggingface_hub import snapshot_download, hf_hub_download
+        if not (seg.exists() and cfg.exists()):
+            snapshot_download('pyannote/speaker-diarization-3.1', local_dir=pyannote_base / 'speaker-diarization-3.1', token=token)
+            snapshot_download('pyannote/segmentation-3.0', local_dir=pyannote_base / 'segmentation-3.0', token=token)
+        if not emb.exists():
+            snapshot_download('pyannote/wespeaker-voxceleb-resnet34-LM', local_dir=pyannote_base / 'wespeaker-voxceleb-resnet34-LM', token=token)
+        if not (plda_1.exists() and plda_2.exists()):
+            plda_dir.mkdir(parents=True, exist_ok=True)
+            hf_hub_download('pyannote/speaker-diarization-community-1', filename='plda/plda.npz', local_dir=pyannote_base, token=token)
+            hf_hub_download('pyannote/speaker-diarization-community-1', filename='plda/xvec_transform.npz', local_dir=pyannote_base, token=token)
+        print("✅ تم تحميل نموذج Pyannote 3.1 وملفات المعايرة محلياً بنجاح!")
         return True
     except Exception as e:
         print(f"⚠️ تعذر تنزيل Pyannote: {e}")
+        return False
+
+
+def check_and_download_whisper_dialectal(token: str = DEFAULT_HF_TOKEN):
+    whisper_ct2 = MODELS_DIR / "whisper-large-v3-turbo-arabic-dialectal-v2-ct2"
+    if (whisper_ct2 / "model.bin").exists() and (whisper_ct2 / "config.json").exists():
+        print("✅ [مكتمل] نموذج Whisper Large-v3 Turbo Arabic Dialectal (CTranslate2) متوفر محلياً")
+        return True
+    print("⬇️ جاري تحميل وتحويل نموذج Whisper Dialectal إلى CTranslate2...")
+    try:
+        script = Path(__file__).resolve().parent / "download_whisper.py"
+        res = subprocess.run([sys.executable, str(script), token])
+        return res.returncode == 0
+    except Exception as e:
+        print(f"⚠️ خطأ أثناء تجهيز Whisper Dialectal: {e}")
         return False
 
 
@@ -194,7 +227,9 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--check":
         check_models()
         check_and_download_pyannote()
+        check_and_download_whisper_dialectal()
     else:
         custom_token = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("--") else DEFAULT_HF_TOKEN
         download_all(token=custom_token)
         check_and_download_pyannote(token=custom_token)
+        check_and_download_whisper_dialectal(token=custom_token)

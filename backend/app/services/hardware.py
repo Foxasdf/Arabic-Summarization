@@ -100,6 +100,16 @@ class HardwareProfile:
     def use_gpu(self) -> bool:
         return self.llama_gpu_offload and self.vram_total_gb >= 2.0
 
+    @property
+    def recommended_asr_workers(self) -> int:
+        override = getattr(settings, "ASR_NUM_WORKERS", 0)
+        if override > 0:
+            return min(4, max(1, int(override)))
+        # Automatic: if system has >= 10.0GB VRAM on GPU, run 2 concurrent ASR workers (~5.6 GB VRAM)
+        if self.use_gpu and self.vram_total_gb >= 10.0:
+            return 2
+        return 1
+
     # --------------------------------------------------------------------- ASR
     def asr_params(self) -> dict:
         # Audar Q8 ≈ 2.1 GB + mmproj 0.6 GB ≈ 2.8 GB total
@@ -112,6 +122,7 @@ class HardwareProfile:
             "n_gpu_layers": gpu_layers,
             "n_threads": self.n_threads,
             "use_gpu": gpu_layers != 0,
+            "num_workers": self.recommended_asr_workers,
         }
 
     # --------------------------------------------------------------------- LLM

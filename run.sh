@@ -101,9 +101,10 @@ fi
 
 echo ""
 echo "========================================================"
-echo "  جاري تشغيل الخادم..."
+echo "  جاري تشغيل الخادم على المنفذ 3011..."
+echo "  افتح المتصفح على: http://localhost:3011"
 echo "========================================================"
 echo ""
 
 cd "$SCRIPT_DIR/backend"
-exec python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+exec python -m uvicorn app.main:app --host 0.0.0.0 --port 3011 --timeout-keep-alive 3600

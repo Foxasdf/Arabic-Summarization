@@ -1,9 +1,13 @@
+import os
 import subprocess
 import shutil
 import re
 import sys
 from pathlib import Path
+from typing import Optional, Dict
 import logging
+
+from ..config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -35,28 +39,85 @@ def get_ffmpeg_binary() -> str:
     return "ffmpeg"
 
 
-async def convert_to_wav(input_path: Path, output_path: Path) -> bool:
+def build_audio_filter_chain(denoise_mode: Optional[str] = None) -> str:
     """
-    Convert any audio file to 16kHz mono WAV using ffmpeg.
+    Build a safe, speech-preserving FFmpeg filter chain.
+    CRITICAL: Never applies hard audio gates ('agate') or dynamic range compressors ('speechnorm'),
+    as gates cut soft syllables and distant speakers, while speechnorm distorts acoustic embeddings.
+    Supported modes: 'none' (default/recommended), 'low', 'moderate', 'high', 'dynamic'.
+    """
+    raw_mode = (denoise_mode or getattr(settings, "AUDIO_DENOISE_MODE", "none")).lower().strip()
+    
+    # Map arabic or aliases to canonical keys
+    mode_map = {
+        "none": "none",
+        "off": "none",
+        "لا معالجة": "none",
+        "بدون معالجة": "none",
+        "معطل": "none",
+        "low": "low",
+        "منخفضة": "low",
+        "منخفض": "low",
+        "moderate": "moderate",
+        "medium": "moderate",
+        "متوسطة": "moderate",
+        "متوسط": "moderate",
+        "high": "high",
+        "aggressive": "high",
+        "عالية": "high",
+        "عالي": "high",
+        "dynamic": "dynamic",
+        "auto": "dynamic",
+        "ديناميكي": "dynamic",
+    }
+    mode = mode_map.get(raw_mode, "none")
+    
+    # "none" / "لا معالجة": completely untouched audio, zero filters
+    if mode == "none":
+        return ""
+
+    if mode == "low":
+        # Low noise reduction: Sub-bass rumble cut (< 50 Hz) only, perfectly preserving all speech acoustics
+        return "highpass=f=50"
+    elif mode in ("moderate", "dynamic"):
+        # Moderate / dynamic: Gentle highpass + mild FFT spectral noise reduction without gating
+        return "highpass=f=60,lowpass=f=7800,afftdn=nf=-25:nr=6:tn=1"
+    elif mode == "high":
+        # High noise reduction: Stronger spectral denoise for noisy environments, strictly without gating
+        return "highpass=f=75,lowpass=f=7500,afftdn=nf=-20:nr=10:tn=1"
+    
+    return ""
+
+
+async def convert_to_wav(
+    input_path: Path,
+    output_path: Path,
+    denoise_mode: Optional[str] = None,
+) -> bool:
+    """
+    Convert any audio file to 16kHz mono WAV using ffmpeg with optional denoising.
     Handles same-file overwrite by converting to a temp file first.
     """
-    logger.info(f"Converting {input_path} to {output_path}")
+    logger.info(f"Converting and cleaning audio {input_path} -> {output_path} (mode={denoise_mode or 'auto'})")
     try:
         ffmpeg_bin = get_ffmpeg_binary()
         temp_output = output_path.with_suffix(".tmp.wav") if input_path.resolve() == output_path.resolve() else output_path
+        filter_chain = build_audio_filter_chain(denoise_mode)
         
         command = [
             ffmpeg_bin, '-y', '-i', str(input_path),
             '-ar', '16000', '-ac', '1',
-            '-c:a', 'pcm_s16le',
-            str(temp_output)
         ]
+        if filter_chain:
+            command.extend(['-af', filter_chain])
+        command.extend(['-c:a', 'pcm_s16le', str(temp_output)])
 
+        timeout_sec = getattr(settings, "AUDIO_CONVERT_TIMEOUT", 7200)
         process = subprocess.run(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=1800
+            timeout=timeout_sec
         )
         
         if process.returncode == 0:
@@ -80,7 +141,7 @@ def get_audio_duration(path: Path) -> float:
     ffmpeg_bin = get_ffmpeg_binary()
     try:
         cmd = [ffmpeg_bin, '-i', str(path)]
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors='ignore', timeout=15)
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors='ignore', timeout=60)
         # Match 'Duration: 00:00:00.00'
         match = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.?\d*)", res.stderr)
         if match:

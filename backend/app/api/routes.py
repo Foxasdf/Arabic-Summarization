@@ -48,8 +48,8 @@ def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-async def _run_with_progress(func, *args):
-    """Run blocking `func(*args, on_progress)` in a thread, yielding (pct,msg) events then ('result', value)."""
+async def _run_with_progress(func, *args, **kwargs):
+    """Run blocking `func(*args, on_progress=cb, **kwargs)` in a thread, yielding (pct,msg) events then ('result', value)."""
     loop = asyncio.get_running_loop()
     q: asyncio.Queue = asyncio.Queue()
 
@@ -58,7 +58,10 @@ async def _run_with_progress(func, *args):
 
     def worker():
         try:
-            res = func(*args, cb)
+            try:
+                res = func(*args, on_progress=cb, **kwargs)
+            except TypeError:
+                res = func(*args, cb, **kwargs)
             loop.call_soon_threadsafe(q.put_nowait, ("result", res))
         except Exception as e:  # noqa
             logger.exception("Background job failed")
@@ -66,10 +69,13 @@ async def _run_with_progress(func, *args):
 
     loop.run_in_executor(None, worker)
     while True:
-        kind, val = await q.get()
-        yield kind, val
-        if kind in ("result", "error"):
-            return
+        try:
+            kind, val = await asyncio.wait_for(q.get(), timeout=10.0)
+            yield kind, val
+            if kind in ("result", "error"):
+                return
+        except asyncio.TimeoutError:
+            yield "heartbeat", None
 
 
 @router.post("/upload", response_model=UploadResponse)
@@ -88,7 +94,12 @@ async def upload_file(file: UploadFile = File(...)):
 
 
 @router.get("/transcribe/{file_id}")
-async def transcribe_endpoint(file_id: str, num_speakers: Optional[int] = None):
+async def transcribe_endpoint(
+    file_id: str,
+    num_speakers: Optional[int] = None,
+    denoise_mode: Optional[str] = None,
+    asr_model: Optional[str] = None,
+):
     meeting = await get_meeting(file_id)
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
@@ -103,39 +114,64 @@ async def transcribe_endpoint(file_id: str, num_speakers: Optional[int] = None):
             wav_path = settings.UPLOAD_DIR / f"{file_id}.16k.wav"
 
             async with _model_lock:
-                await save_meeting({"id": file_id, "status": "processing"})
-                yield _sse({"step": "preprocessing", "progress": 3, "message": "جاري تجهيز الملف الصوتي..."})
-                if not await convert_to_wav(files[0], wav_path):
-                    raise RuntimeError("فشل تحويل الملف الصوتي (ffmpeg)")
-                yield _sse({"step": "preprocessing", "progress": 8, "message": "تم تحويل الملف الصوتي بنجاح"})
+                denoise_names = {
+                    "dynamic": "ديناميكي",
+                    "auto": "ديناميكي",
+                    "low": "منخفضة",
+                    "moderate": "متوسطة",
+                    "medium": "متوسطة",
+                    "high": "عالية",
+                    "aggressive": "عالية",
+                    "none": "لا معالجة",
+                    "off": "لا معالجة",
+                    "لا معالجة": "لا معالجة",
+                    "بدون معالجة": "لا معالجة",
+                }
+                mode_str = denoise_names.get((denoise_mode or "").lower(), denoise_mode or "")
+                if mode_str == "لا معالجة":
+                    denoise_label = " (بدون معالجة)"
+                elif mode_str:
+                    denoise_label = f" (عزل: {mode_str})"
+                else:
+                    denoise_label = ""
+                yield _sse({"step": "preprocessing", "progress": 3, "message": f"جاري تجهيز وتنقية الملف الصوتي{denoise_label}..."})
+                if not await convert_to_wav(files[0], wav_path, denoise_mode=denoise_mode):
+                    raise RuntimeError("فشل تحويل وتنقية الملف الصوتي (ffmpeg)")
+                yield _sse({"step": "preprocessing", "progress": 8, "message": "تم تحويل وتنقية الملف الصوتي بنجاح"})
 
-                backend = diarization_backend_name()
-                is_pyannote = "pyannote" in backend.lower()
-                backend_label = "Pyannote (NVIDIA GPU)" if is_pyannote else "المحرك المدمج"
+                backend_label = "Pyannote 3.1 (NVIDIA GPU)"
                 yield _sse({"step": "diarization", "progress": 10,
                             "message": f"جاري فصل وتحديد المتحدثين ({backend_label})..."})
                 turns = None
                 async for kind, val in _run_with_progress(diarize, wav_path, num_speakers):
                     if kind == "progress":
                         yield _sse({"step": "diarization", "progress": val[0], "message": val[1]})
+                    elif kind == "heartbeat":
+                        yield ": keepalive\n\n"
                     elif kind == "error":
                         raise val
                     else:
                         turns = val
                 n_spk = len({t['speaker'] for t in turns}) if turns else 1
-                yield _sse({"step": "diarization", "progress": 25, "message": f"تم اكتشاف {n_spk} متحدث/متحدثين بنجاح"})
+                yield _sse({"step": "diarization", "progress": 25, "message": f"تم اكتشاف {n_spk} متحدث/متحدثين بنجاح عبر Pyannote"})
 
-                yield _sse({"step": "asr", "progress": 25, "message": "جاري تحميل نموذج Audar وتفريغ الصوت..."})
+                # Full-coverage continuous ASR + Pyannote speaker alignment:
+                # Guarantees zero dropped words across the entire meeting while accurately assigning speaker turns
+                yield _sse({"step": "asr", "progress": 25, "message": "جاري تفريغ الصوت بنموذج ASR (تغطية كاملة للكلام)..."})
                 asr_result = None
-                async for kind, val in _run_with_progress(transcribe_audio, wav_path):
+                async for kind, val in _run_with_progress(
+                    transcribe_audio, wav_path, model_identifier=asr_model, progress_range=(25, 92)
+                ):
                     if kind == "progress":
                         yield _sse({"step": "asr", "progress": val[0], "message": val[1]})
+                    elif kind == "heartbeat":
+                        yield ": keepalive\n\n"
                     elif kind == "error":
                         raise val
                     else:
                         asr_result = val
 
-                yield _sse({"step": "alignment", "progress": 93, "message": "جاري مطابقة النص مع المتحدثين..."})
+                yield _sse({"step": "alignment", "progress": 93, "message": "جاري مطابقة وتوزيع المتحدثين على النص (Pyannote)..."})
                 words = asr_result.get("words", []) if asr_result else []
                 segments = align_timestamps(words, turns)
 
@@ -154,7 +190,15 @@ async def transcribe_endpoint(file_id: str, num_speakers: Optional[int] = None):
             await save_meeting({"id": file_id, "status": "error"})
             yield _sse({"error": str(e)})
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 class SpeakersUpdate(BaseModel):
@@ -193,6 +237,8 @@ async def summarize_stream(meeting_id: str, model_key: str = "falcon-h1-7b-instr
                 async for kind, val in _run_with_progress(summarize_meeting, segments, speakers, model_key):
                     if kind == "progress":
                         yield _sse({"step": "summarize", "progress": val[0], "message": val[1]})
+                    elif kind == "heartbeat":
+                        yield ": keepalive\n\n"
                     elif kind == "error":
                         raise val
                     else:
@@ -204,7 +250,15 @@ async def summarize_stream(meeting_id: str, model_key: str = "falcon-h1-7b-instr
             logger.exception("Summarization failed")
             yield _sse({"error": str(e)})
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/summarize")
@@ -368,8 +422,15 @@ async def delete_meeting_endpoint(meeting_id: str):
 
 
 @router.get("/models", response_model=list[ModelInfoSchema])
-async def list_models():
+async def list_models(type: Optional[str] = None):
+    if type:
+        return [ModelInfoSchema(**m.__dict__) for m in registry.get_models_by_type(type)]
     return [ModelInfoSchema(**m.__dict__) for m in registry.get_models_by_type("llm")]
+
+
+@router.get("/models/asr", response_model=list[ModelInfoSchema])
+async def list_asr_models():
+    return [ModelInfoSchema(**m.__dict__) for m in registry.get_models_by_type("asr")]
 
 
 @router.get("/system")

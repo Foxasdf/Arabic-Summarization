@@ -91,8 +91,8 @@ class LLMEngine(BaseModelEngine):
         return len(self.model.tokenize(text.encode("utf-8"), add_bos=False, special=False))
 
     def chat(self, messages: list, max_tokens: Optional[int] = None,
-             temperature: float = 0.2, top_p: float = 0.9, top_k: int = 40,
-             min_p: float = 0.05, repeat_penalty: float = 1.1) -> str:
+             temperature: float = 0.20, top_p: float = 0.88, top_k: int = 40,
+             min_p: float = 0.05, repeat_penalty: float = 1.10) -> str:
         if not self.is_loaded():
             self.load()
         max_tokens = max_tokens or self.max_tokens
@@ -133,8 +133,10 @@ class LLMEngine(BaseModelEngine):
         return response["choices"][0]["text"].strip()
 
     def generate(self, system_prompt: str, user_prompt: str, max_tokens: Optional[int] = None,
-                 temperature: float = 0.2) -> str:
+                 temperature: float = 0.20, top_p: float = 0.88, top_k: int = 40,
+                 min_p: float = 0.05, repeat_penalty: float = 1.10) -> str:
         return self.chat([
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
-        ], max_tokens=max_tokens, temperature=temperature)
+        ], max_tokens=max_tokens, temperature=temperature, top_p=top_p,
+           top_k=top_k, min_p=min_p, repeat_penalty=repeat_penalty)

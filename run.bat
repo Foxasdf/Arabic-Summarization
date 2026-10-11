@@ -101,10 +101,12 @@ echo [4/4] ملفات الواجهة الأمامية جاهزة.
 :: 5. تشغيل خادم التطبيق
 echo.
 echo ========================================================
-echo   جاري تشغيل الخادم...
+echo   جاري تشغيل الخادم على المنفذ 3011...
+echo   افتح المتصفح على: http://localhost:3011
 echo ========================================================
 echo.
 
 cd /d "%PROJECT_ROOT%backend"
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+python -m uvicorn app.main:app --host 0.0.0.0 --port 3011 --timeout-keep-alive 3600
 pause
+

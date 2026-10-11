@@ -1,4 +1,4 @@
-﻿from dataclasses import dataclass
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 import logging
 
@@ -39,12 +39,31 @@ class ModelRegistry:
         # Primary ASR Model requested by user
         self.register(ModelInfo(
             key="audar-asr-v1-turbo",
-            name="Audar ASR V1 Turbo (Q8_0)",
+            name="Audar ASR",
             model_type="asr",
             gguf_filename="Audar-ASR-V1-Turbo-Q8_0.gguf",
             description="النموذج الأساسي لتحويل الصوت إلى نص عربي (الأعلى دقة وتعرف على اللهجات)",
             context_size=4096,
         ))
+        # Cohere Transcribe Arabic
+        self.register(ModelInfo(
+            key="cohere-transcribe-arabic",
+            name="Cohere Transcribe",
+            model_type="asr",
+            gguf_filename="cohere-transcribe-arabic-07-2026-Q5_K_M.gguf",
+            description="نموذج كوهير المتخصص في تفريغ اللهجات العربية والكلام المزدوج (transcribe.cpp)",
+            context_size=4096,
+        ))
+        # Whisper Large-v3 Turbo Arabic Dialectal (CTranslate2)
+        self.register(ModelInfo(
+            key="whisper-large-v3-turbo-arabic-dialectal",
+            name="Whisper Turbo",
+            model_type="asr",
+            gguf_filename="whisper-large-v3-turbo-arabic-dialectal-v2-ct2",
+            description="نموذج Whisper المضبوط بدقة على اللهجات العربية (CTranslate2 int8_float16)",
+            context_size=448,
+        ))
+
         # Keep legacy aliases for seamless compatibility
         self.register(ModelInfo(
             key="falcon-h1-arabic-7b",
@@ -79,6 +98,10 @@ class ModelRegistry:
     def list_llm_models(self) -> List[ModelInfo]:
         """Convenience method to list all LLM models."""
         return self.get_models_by_type("llm")
+
+    def list_asr_models(self) -> List[ModelInfo]:
+        """Convenience method to list all ASR models."""
+        return self.get_models_by_type("asr")
 
 # Singleton instance
 registry = ModelRegistry()

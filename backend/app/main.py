@@ -1,7 +1,23 @@
+import sys
+import os
+import warnings
+
+# On Windows: suppress native OS modal error dialogs for any missing DLL procedure entry points
+if sys.platform.startswith("win"):
+    try:
+        import ctypes
+        # SEM_FAILCRITICALERRORS (0x0001) | SEM_NOGPFAULTERRORBOX (0x0002)
+        ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x0002)
+    except Exception:
+        pass
+
+# Block broken/incompatible torchcodec from triggering OS DLL popups or warnings
+sys.modules["torchcodec"] = None
+warnings.filterwarnings("ignore", category=UserWarning, module=r".*pyannote.*")
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-import os
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 os.environ.setdefault("SHIM_MCCOMPAT", "0x000000001")
 import logging
