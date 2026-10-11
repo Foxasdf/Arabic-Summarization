@@ -105,20 +105,40 @@ class HardwareProfile:
         override = getattr(settings, "ASR_NUM_WORKERS", 0)
         if override > 0:
             return min(4, max(1, int(override)))
-        # Automatic: if system has >= 10.0GB VRAM on GPU, run 2 concurrent ASR workers (~5.6 GB VRAM)
-        if self.use_gpu and self.vram_total_gb >= 10.0:
-            return 2
+        if not self.use_gpu:
+            return 2 if (self.cpu_threads >= 8 and self.ram_available_gb >= 16.0) else 1
+
+        # Dynamic VRAM scaling:
+        # Each ASR model worker takes ~1.8 - 2.8 GB VRAM.
+        # Preserve at least 2.0 GB headroom for CUDA context & OS.
+        avail_vram = max(0.0, self.vram_free_gb - 2.0)
+        if self.vram_total_gb >= 15.0 and avail_vram >= 8.5:
+            return 4  # 24GB GPUs (RTX 3090, RTX 4090, A10G)
+        elif self.vram_total_gb >= 10.0 and avail_vram >= 5.0:
+            return 3  # 11GB - 12GB GPUs (RTX 2080 Ti, RTX 3060 12GB, RTX 3080)
+        elif self.vram_total_gb >= 7.5 and avail_vram >= 2.5:
+            return 2  # 8GB GPUs (RTX 2070, RTX 2080, RTX 3070)
         return 1
 
     # --------------------------------------------------------------------- ASR
     def asr_params(self) -> dict:
-        # Audar Q8 ≈ 2.1 GB + mmproj 0.6 GB ≈ 2.8 GB total
         gpu_layers = 0
         if self.use_gpu:
             gpu_layers = -1 if self.vram_free_gb >= 2.8 else 16
+
+        batch_override = getattr(settings, "ASR_BATCH_SIZE", 0)
+        if batch_override > 0:
+            n_batch = int(batch_override)
+        elif self.vram_total_gb >= 10.0 and self.use_gpu:
+            n_batch = 1024
+        elif self.tier != "low":
+            n_batch = 512
+        else:
+            n_batch = 256
+
         return {
             "n_ctx": 2048,  # one 25 s window ≈ 750 audio tokens + 256 output
-            "n_batch": 512 if self.tier != "low" else 256,
+            "n_batch": n_batch,
             "n_gpu_layers": gpu_layers,
             "n_threads": self.n_threads,
             "use_gpu": gpu_layers != 0,

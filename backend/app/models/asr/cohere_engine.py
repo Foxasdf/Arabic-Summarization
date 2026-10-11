@@ -29,8 +29,8 @@ class CohereASREngine(BaseASREngine):
     on Windows between llama-cpp-python and transcribe_cpp.
     """
 
-    # Cohere inference on Vulkan/GPU is ultra-fast (~30x realtime); single worker avoids VRAM contention
-    allow_secondary_workers: bool = False
+    # Cohere inference supports parallel isolated worker processes across available VRAM
+    allow_secondary_workers: bool = True
 
     def __init__(self, model_path: Optional[Path] = None):
         default_path = settings.MODELS_DIR / getattr(

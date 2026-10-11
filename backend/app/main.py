@@ -66,12 +66,16 @@ def print_startup_banner():
     falcon_ok = (settings.MODELS_DIR / settings.LLM_GGUF_FILENAME).exists()
     models_status = "جاهزة بالكامل ✅" if (audar_ok and falcon_ok) else "⚠️ بعض النماذج غير محملة (شغّل: python scripts/download_models.py)"
 
+    workers_count = prof.recommended_asr_workers
+    workers_str = f"×{workers_count} مقاطع بالتوازي (Parallel Speedup ×{workers_count})" if workers_count > 1 else "1 مقطع بالتسلسل"
+
     banner_lines = [
         "",
         "=" * 64,
         "   ملخص الاجتماعات العربية (Arabic Meeting Summarizer)",
         "=" * 64,
         f"   المعالج الرسومي (GPU):         {gpu_status}",
+        f"   التفريغ المتوازي (Parallel ASR): {workers_str}",
         f"   حالة النماذج (Models):        {models_status}",
         f"   الرابط المحلي (Local):         http://localhost:{port}",
     ]

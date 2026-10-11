@@ -167,86 +167,205 @@ class BaseASREngine(BaseModelEngine):
         chunks_count = max(1, int((total_duration + step - 1) // step))
         logger.info(f"Starting ASR on {audio_path.name} (Duration: {total_duration}s, {chunks_count} chunks)")
 
+        slice_info = []
+        for i in range(chunks_count):
+            start_sec = i * step
+            dur_sec = min(chunk_len, total_duration - start_sec)
+            if dur_sec <= 0.3:
+                break
+            slice_info.append({
+                "idx": i,
+                "start": start_sec,
+                "dur": dur_sec,
+            })
+
+        # Load audio into memory once for high-speed slicing without invoking 100+ ffmpeg processes
+        audio_data = None
+        sr = 16000
+        try:
+            from scipy.io import wavfile
+            sr_read, raw_data = wavfile.read(str(audio_path))
+            if sr_read == 16000:
+                audio_data = raw_data
+                sr = sr_read
+        except Exception:
+            audio_data = None
+
+        # Check worker configuration scaled to GPU VRAM and CPU cores
+        from ...services.hardware import get_hardware_profile
+        hw_params = get_hardware_profile().asr_params()
+        target_workers = max(1, min(4, hw_params.get("num_workers", 1)))
+
+        extra_engines = []
+        if getattr(self, "allow_secondary_workers", True) and target_workers > 1 and len(slice_info) > 2:
+            for w_idx in range(1, target_workers):
+                try:
+                    cls = self.__class__
+                    w = cls(self.model_path)
+                    w.load()
+                    extra_engines.append(w)
+                    logger.info(f"Initialized parallel ASR worker #{len(extra_engines)+1} for {cls.__name__}")
+                except Exception as e:
+                    logger.warning(f"Could not initialize secondary ASR worker #{w_idx+1} ({e}); continuing with {len(extra_engines)+1} workers.")
+                    break
+
+        all_engines = [self] + extra_engines
+        actual_workers = len(all_engines)
+        logger.info(f"Executing continuous ASR with {actual_workers} concurrent worker(s) across {len(slice_info)} chunks.")
+
         all_text_parts = []
         all_words = []
         lo, hi = progress_range
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_path = Path(tmp_dir)
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                tmp_path = Path(tmp_dir)
+                slice_paths: List[Optional[Path]] = []
 
-            for i in range(chunks_count):
-                start_sec = i * step
-                dur_sec = min(chunk_len, total_duration - start_sec)
-                if dur_sec <= 0.3:
-                    break
+                for item in slice_info:
+                    i = item["idx"]
+                    start = item["start"]
+                    dur = item["dur"]
+                    slice_wav = tmp_path / f"slice_{i:04d}.wav"
 
-                if on_progress:
-                    start_pct = int(lo + (i / max(1, chunks_count)) * (hi - lo))
-                    cur_sec = int(round(start_sec))
-                    tot_sec = int(round(total_duration))
-                    on_progress(start_pct, f"جاري تفريغ المقطع {i+1} من {chunks_count} ({cur_sec}/{tot_sec} ثانية)...")
+                    slice_created = False
+                    if audio_data is not None:
+                        try:
+                            from scipy.io import wavfile
+                            s_idx = int(start * sr)
+                            e_idx = min(len(audio_data), int((start + dur) * sr))
+                            if e_idx > s_idx:
+                                wavfile.write(str(slice_wav), sr, audio_data[s_idx:e_idx])
+                                slice_created = slice_wav.exists()
+                        except Exception:
+                            slice_created = False
 
-                slice_wav = tmp_path / f"slice_{i:04d}.wav"
+                    if not slice_created:
+                        cmd = [
+                            ffmpeg_bin, "-y", "-loglevel", "error",
+                            "-ss", f"{start:.2f}", "-t", f"{dur:.2f}",
+                            "-i", str(audio_path),
+                            "-ar", "16000", "-ac", "1",
+                            "-c:a", "pcm_s16le",
+                            str(slice_wav),
+                        ]
+                        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        slice_created = (proc.returncode == 0 and slice_wav.exists())
 
-                cmd = [
-                    ffmpeg_bin, "-y",
-                    "-ss", str(round(start_sec, 2)),
-                    "-t", str(round(dur_sec, 2)),
-                    "-i", str(audio_path),
-                    "-ar", "16000", "-ac", "1",
-                    "-c:a", "pcm_s16le",
-                    str(slice_wav),
-                ]
-                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                if proc.returncode != 0 or not slice_wav.exists():
-                    logger.warning(f"Failed to slice audio at {start_sec}s: {proc.stderr.decode(errors='ignore')}")
-                    continue
+                    slice_paths.append(slice_wav if slice_created else None)
 
-                slice_text = self.transcribe_slice(slice_wav, dur_sec=dur_sec)
-                if slice_text:
+                results: List[str] = [""] * len(slice_info)
+                completed_count = 0
+
+                if actual_workers > 1:
+                    import queue
+                    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+                    engine_q: queue.Queue = queue.Queue()
+                    for eng in all_engines:
+                        engine_q.put(eng)
+
+                    def _task(idx: int, p: Optional[Path], dur: float):
+                        if p is None or not p.exists():
+                            return idx, ""
+                        worker_eng = engine_q.get()
+                        try:
+                            return idx, worker_eng.transcribe_slice(p, dur_sec=dur)
+                        finally:
+                            engine_q.put(worker_eng)
+
+                    with ThreadPoolExecutor(max_workers=actual_workers) as executor:
+                        futures = [
+                            executor.submit(_task, item["idx"], slice_paths[idx_k], item["dur"])
+                            for idx_k, item in enumerate(slice_info)
+                        ]
+                        for fut in as_completed(futures):
+                            idx, text = fut.result()
+                            results[idx] = text
+                            completed_count += 1
+                            if on_progress:
+                                pct = int(lo + (completed_count / max(1, len(slice_info))) * (hi - lo))
+                                tot_sec = int(round(total_duration))
+                                on_progress(
+                                    pct,
+                                    f"جاري تفريغ الصوت: المقطع {completed_count} من {len(slice_info)} [تسريع متوازي ×{actual_workers}]..."
+                                )
+                else:
+                    for idx_k, item in enumerate(slice_info):
+                        idx = item["idx"]
+                        p = slice_paths[idx_k]
+                        dur = item["dur"]
+                        if p is not None and p.exists():
+                            results[idx] = self.transcribe_slice(p, dur_sec=dur)
+                        completed_count += 1
+                        if on_progress:
+                            pct = int(lo + (completed_count / max(1, len(slice_info))) * (hi - lo))
+                            tot_sec = int(round(total_duration))
+                            on_progress(pct, f"تم تفريغ المقطع {completed_count} من {len(slice_info)} ({int(round(item['start']))}/{tot_sec} ث)...")
+
+                # Clean up temporary slice audio files
+                for sp in slice_paths:
+                    if sp and sp.exists():
+                        try:
+                            sp.unlink()
+                        except OSError:
+                            pass
+
+                # Sequential overlap deduplication and word alignment across chunk seams
+                for idx_k, item in enumerate(slice_info):
+                    idx = item["idx"]
+                    start_sec = item["start"]
+                    dur_sec = item["dur"]
+                    slice_text = results[idx]
+                    if not slice_text:
+                        continue
+
                     words = slice_text.split()
-                    if words:
-                        word_dur = dur_sec / len(words)
-                        chunk_words = []
-                        for w_idx, word in enumerate(words):
-                            w_start = round(start_sec + w_idx * word_dur, 2)
-                            w_end = round(start_sec + (w_idx + 1) * word_dur, 2)
-                            chunk_words.append({
-                                "word": word,
-                                "start": w_start,
-                                "end": w_end,
-                            })
+                    if not words:
+                        continue
 
-                        # Deduplicate overlap region
-                        if i > 0 and all_words:
-                            overlap_boundary = start_sec + overlap
-                            new_start_idx = 0
-                            for idx, cw in enumerate(chunk_words):
-                                if cw["start"] >= overlap_boundary - 0.2:
-                                    new_start_idx = idx
-                                    break
-                            chunk_words = chunk_words[new_start_idx:]
+                    word_dur = dur_sec / len(words)
+                    chunk_words = []
+                    for w_idx, word in enumerate(words):
+                        w_start = round(start_sec + w_idx * word_dur, 2)
+                        w_end = round(start_sec + (w_idx + 1) * word_dur, 2)
+                        chunk_words.append({
+                            "word": word,
+                            "start": w_start,
+                            "end": w_end,
+                        })
 
-                            # Drop duplicate boundary words (e.g. repeated word across the chunk seam)
-                            while chunk_words and all_words:
-                                last_w = re.sub(r"[،,.\?!؟;:\"\']", "", all_words[-1]["word"]).strip()
-                                first_w = re.sub(r"[،,.\?!؟;:\"\']", "", chunk_words[0]["word"]).strip()
-                                if last_w and first_w and last_w == first_w and abs(chunk_words[0]["start"] - all_words[-1]["start"]) <= 1.5:
-                                    logger.info(f"Deduplicated boundary word: '{chunk_words[0]['word']}' at {chunk_words[0]['start']}s")
-                                    chunk_words = chunk_words[1:]
-                                else:
-                                    break
+                    # Deduplicate overlap region
+                    if idx > 0 and all_words:
+                        overlap_boundary = start_sec + overlap
+                        new_start_idx = 0
+                        for c_idx, cw in enumerate(chunk_words):
+                            if cw["start"] >= overlap_boundary - 0.2:
+                                new_start_idx = c_idx
+                                break
+                        chunk_words = chunk_words[new_start_idx:]
 
-                        if chunk_words:
-                            text_part = " ".join(cw["word"] for cw in chunk_words)
-                            all_text_parts.append(text_part)
-                            all_words.extend(chunk_words)
+                        # Drop duplicate boundary words (e.g. repeated word across the chunk seam)
+                        while chunk_words and all_words:
+                            last_w = re.sub(r"[،,.\?!؟;:\"\']", "", all_words[-1]["word"]).strip()
+                            first_w = re.sub(r"[،,.\?!؟;:\"\']", "", chunk_words[0]["word"]).strip()
+                            if last_w and first_w and last_w == first_w and abs(chunk_words[0]["start"] - all_words[-1]["start"]) <= 1.5:
+                                logger.info(f"Deduplicated boundary word: '{chunk_words[0]['word']}' at {chunk_words[0]['start']}s")
+                                chunk_words = chunk_words[1:]
+                            else:
+                                break
 
-                if on_progress:
-                    pct = int(lo + ((i + 1) / max(1, chunks_count)) * (hi - lo))
-                    processed_sec = min(int(round(total_duration)), int(round(start_sec + dur_sec)))
-                    tot_sec = int(round(total_duration))
-                    on_progress(pct, f"تم تفريغ المقطع {i+1} من {chunks_count} ({processed_sec}/{tot_sec} ثانية)...")
+                    if chunk_words:
+                        text_part = " ".join(cw["word"] for cw in chunk_words)
+                        all_text_parts.append(text_part)
+                        all_words.extend(chunk_words)
+
+        finally:
+            for extra_eng in extra_engines:
+                try:
+                    extra_eng.unload()
+                except Exception as ex:
+                    logger.debug(f"Error unloading extra ASR engine: {ex}")
 
         full_text = " ".join(all_text_parts).strip()
         logger.info(f"ASR complete. Total words: {len(all_words)}, Total characters: {len(full_text)}")
@@ -290,19 +409,20 @@ class BaseASREngine(BaseModelEngine):
         # Check worker configuration
         from ...services.hardware import get_hardware_profile
         hw_params = get_hardware_profile().asr_params()
-        target_workers = max(1, min(2, hw_params.get("num_workers", 1)))
+        target_workers = max(1, min(4, hw_params.get("num_workers", 1)))
 
         extra_engines = []
         if getattr(self, "allow_secondary_workers", True) and target_workers > 1 and len(windows) > 2:
-            try:
-                # Instantiate second worker of the same class
-                cls = self.__class__
-                w2 = cls(self.model_path)
-                w2.load()
-                extra_engines.append(w2)
-            except Exception as e:
-                logger.warning(f"Could not initialize secondary ASR worker ({e}); using single worker.")
-                extra_engines.clear()
+            for w_idx in range(1, target_workers):
+                try:
+                    cls = self.__class__
+                    w = cls(self.model_path)
+                    w.load()
+                    extra_engines.append(w)
+                    logger.info(f"Initialized parallel ASR turn worker #{len(extra_engines)+1}")
+                except Exception as e:
+                    logger.warning(f"Could not initialize secondary ASR worker #{w_idx+1} ({e}); continuing with {len(extra_engines)+1} workers.")
+                    break
 
         all_engines = [self] + extra_engines
         actual_workers = len(all_engines)

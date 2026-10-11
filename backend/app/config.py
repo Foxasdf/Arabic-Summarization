@@ -45,7 +45,8 @@ class Settings(BaseSettings):
     ASR_MMPROJ_FILENAME: str = "mmproj-Audar-ASR-V1-Turbo.gguf"
     COHERE_ASR_FILENAME: str = "cohere-transcribe-arabic-07-2026-Q5_K_M.gguf"
     WHISPER_DIALECTAL_DIRNAME: str = "whisper-large-v3-turbo-arabic-dialectal-v2-ct2"
-    ASR_NUM_WORKERS: int = 0  # 0 = auto-detect (2 workers if VRAM >= 10GB, else 1), or explicitly 1 or 2
+    ASR_NUM_WORKERS: int = 0  # 0 = auto-detect (scales dynamically: 3 workers on 11GB RTX 2080 Ti), or explicitly 1-4
+    ASR_BATCH_SIZE: int = 0   # 0 = auto-detect (1024 on >=10GB VRAM, else 512), or custom override
 
     # Audar ASR Dialect & Generation Parameters (Tuned for Levantine / Syrian speech)
     AUDAR_SYSTEM_PROMPT: str = (
