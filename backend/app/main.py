@@ -61,12 +61,18 @@ def print_startup_banner():
 
     port = settings.PORT
     gpu_status = f"{prof.gpu_name} (مُفعّل بالكامل - VRAM: {prof.vram_free_gb:.1f}GB/{prof.vram_total_gb:.1f}GB)" if prof.gpu_name and prof.use_gpu else (prof.gpu_name or "المعالج المركزي CPU فقط")
+    
+    audar_ok = (settings.MODELS_DIR / settings.ASR_GGUF_FILENAME).exists() or (settings.MODELS_DIR / settings.COHERE_ASR_FILENAME).exists()
+    falcon_ok = (settings.MODELS_DIR / settings.LLM_GGUF_FILENAME).exists()
+    models_status = "جاهزة بالكامل ✅" if (audar_ok and falcon_ok) else "⚠️ بعض النماذج غير محملة (شغّل: python scripts/download_models.py)"
+
     banner_lines = [
         "",
         "=" * 64,
         "   ملخص الاجتماعات العربية (Arabic Meeting Summarizer)",
         "=" * 64,
         f"   المعالج الرسومي (GPU):         {gpu_status}",
+        f"   حالة النماذج (Models):        {models_status}",
         f"   الرابط المحلي (Local):         http://localhost:{port}",
     ]
     if local_ip:

@@ -63,6 +63,13 @@ if not errorlevel 1 (
 :deps_ok
 echo [2/4] البيئة الافتراضية والمكتبات جاهزة.
 
+:: فحص النماذج الأساسية
+if exist "%PROJECT_ROOT%models\Audar-ASR-V1-Turbo-Q8_0.gguf" if exist "%PROJECT_ROOT%models\Falcon-H1-7B-Instruct-IQ4_XS.gguf" goto :models_ok
+echo [!] بعض النماذج الأساسية غير متوفرة في مجلد models\.
+echo جاري تشغيل سكربت تحميل النماذج تلقائياً...
+python "%PROJECT_ROOT%scripts\download_models.py"
+:models_ok
+
 :: 3. فحص معالج الصوت ffmpeg
 echo [3/4] فحص معالج الصوت ffmpeg...
 where ffmpeg >nul 2>&1

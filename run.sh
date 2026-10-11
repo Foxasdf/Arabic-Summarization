@@ -72,6 +72,13 @@ if not gpu_torch or not gpu_llama:
 " 2>/dev/null || true
 fi
 
+# Model check & auto-download
+if [ ! -f "$SCRIPT_DIR/models/Audar-ASR-V1-Turbo-Q8_0.gguf" ] || [ ! -f "$SCRIPT_DIR/models/Falcon-H1-7B-Instruct-IQ4_XS.gguf" ]; then
+    echo "[!] بعض النماذج الأساسية غير متوفرة في مجلد models/."
+    echo "    جاري تشغيل سكربت تحميل النماذج تلقائياً..."
+    python "$SCRIPT_DIR/scripts/download_models.py"
+fi
+
 # 3. Ensure ffmpeg is available
 echo "[3/4] فحص معالج الصوت (ffmpeg)..."
 if ! command -v ffmpeg &>/dev/null; then

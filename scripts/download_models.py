@@ -176,6 +176,21 @@ def download_all(token: str = DEFAULT_HF_TOKEN):
             print(f"❌ لم يتم اكتمال تحميل {model['filename']}. يمكنك تشغيل السكربت مجدداً للاستئناف.")
         print()
 
+def _is_lfs_pointer(file_path: Path, min_size: int = 1_000_000) -> bool:
+    if not file_path.exists():
+        return True
+    if file_path.stat().st_size < min_size:
+        return True
+    try:
+        with open(file_path, "rb") as f:
+            header = f.read(30)
+            if header.startswith(b"version http") or b"git-lfs" in header:
+                return True
+    except Exception:
+        return True
+    return False
+
+
 def check_and_download_pyannote(token: str = DEFAULT_HF_TOKEN):
     pyannote_base = MODELS_DIR / "pyannote"
     seg = pyannote_base / "segmentation-3.0" / "pytorch_model.bin"
@@ -185,26 +200,73 @@ def check_and_download_pyannote(token: str = DEFAULT_HF_TOKEN):
     plda_1 = plda_dir / "plda.npz"
     plda_2 = plda_dir / "xvec_transform.npz"
 
-    if seg.exists() and emb.exists() and cfg.exists() and plda_1.exists() and plda_2.exists():
+    # Validate authentic binary sizes (seg: ~5.9MB, emb: ~26.6MB)
+    seg_valid = not _is_lfs_pointer(seg, min_size=5_000_000)
+    emb_valid = not _is_lfs_pointer(emb, min_size=25_000_000)
+    plda_valid = plda_1.exists() and plda_2.exists() and plda_1.stat().st_size > 50000 and plda_2.stat().st_size > 50000
+    cfg_valid = cfg.exists() and cfg.stat().st_size > 100
+
+    if seg_valid and emb_valid and cfg_valid and plda_valid:
         print("✅ [مكتمل] نموذج فصل المتحدثين Pyannote 3.1 مع معايرة PLDA متوفر محلياً (100% Offline)")
         return True
 
-    print("⬇️ جاري تحميل أوزان نموذج Pyannote 3.1 وملفات المعايرة محلياً...")
-    try:
-        from huggingface_hub import snapshot_download, hf_hub_download
-        if not (seg.exists() and cfg.exists()):
-            snapshot_download('pyannote/speaker-diarization-3.1', local_dir=pyannote_base / 'speaker-diarization-3.1', token=token)
-            snapshot_download('pyannote/segmentation-3.0', local_dir=pyannote_base / 'segmentation-3.0', token=token)
-        if not emb.exists():
-            snapshot_download('pyannote/wespeaker-voxceleb-resnet34-LM', local_dir=pyannote_base / 'wespeaker-voxceleb-resnet34-LM', token=token)
-        if not (plda_1.exists() and plda_2.exists()):
-            plda_dir.mkdir(parents=True, exist_ok=True)
-            hf_hub_download('pyannote/speaker-diarization-community-1', filename='plda/plda.npz', local_dir=pyannote_base, token=token)
-            hf_hub_download('pyannote/speaker-diarization-community-1', filename='plda/xvec_transform.npz', local_dir=pyannote_base, token=token)
-        print("✅ تم تحميل نموذج Pyannote 3.1 وملفات المعايرة محلياً بنجاح!")
+    print("⬇️ جاري تحميل/تحديث أوزان نموذج Pyannote 3.1 الأصلية وملفات المعايرة محلياً...")
+    
+    # 1. Ensure config.yaml exists
+    if not cfg_valid:
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        download_with_curl(
+            url="https://huggingface.co/pyannote/speaker-diarization-3.1/resolve/main/config.yaml",
+            target_file=cfg,
+            token=token,
+            expected_size=100,
+        )
+
+    # 2. Download Segmentation 3.0 weights (5.9MB)
+    if not seg_valid:
+        seg.parent.mkdir(parents=True, exist_ok=True)
+        print("   تحميل أوزان Segmentation 3.0 (5.9 MB)...")
+        download_with_curl(
+            url="https://huggingface.co/pyannote/segmentation-3.0/resolve/main/pytorch_model.bin",
+            target_file=seg,
+            token=token,
+            expected_size=5905440,
+        )
+
+    # 3. Download WeSpeaker ResNet34 weights (26.6MB)
+    if not emb_valid:
+        emb.parent.mkdir(parents=True, exist_ok=True)
+        print("   تحميل أوزان WeSpeaker ResNet34 (26.6 MB)...")
+        download_with_curl(
+            url="https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM/resolve/main/pytorch_model.bin",
+            target_file=emb,
+            token=token,
+            expected_size=26645418,
+        )
+
+    # 4. Download PLDA calibration matrices
+    if not plda_valid:
+        plda_dir.mkdir(parents=True, exist_ok=True)
+        print("   تحميل ملفات معايرة PLDA...")
+        download_with_curl(
+            url="https://huggingface.co/pyannote/speaker-diarization-community-1/resolve/main/plda/plda.npz",
+            target_file=plda_1,
+            token=token,
+            expected_size=133852,
+        )
+        download_with_curl(
+            url="https://huggingface.co/pyannote/speaker-diarization-community-1/resolve/main/plda/xvec_transform.npz",
+            target_file=plda_2,
+            token=token,
+            expected_size=134376,
+        )
+
+    # Final check
+    if not _is_lfs_pointer(seg, 5_000_000) and not _is_lfs_pointer(emb, 25_000_000):
+        print("✅ تم تثبيت أوزان Pyannote 3.1 بنجاح بحجمها الفعلي!")
         return True
-    except Exception as e:
-        print(f"⚠️ تعذر تنزيل Pyannote: {e}")
+    else:
+        print("⚠️ لم تكتمل أوزان Pyannote 3.1 بالكامل. يرجى إعادة التشغيل للتأكد.")
         return False
 
 

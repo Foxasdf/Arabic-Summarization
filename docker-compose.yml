@@ -5,7 +5,7 @@ services:
       dockerfile: Dockerfile
     container_name: meeting-summarizer-backend
     ports:
-      - "${BACKEND_PORT:-8811}:8000"
+      - "${BACKEND_PORT:-8811}:3011"
     deploy:
       resources:
         reservations:
@@ -19,7 +19,7 @@ services:
       - ./backend/data:/app/data
     environment:
       - MEETING_HOST=0.0.0.0
-      - MEETING_PORT=8000
+      - MEETING_PORT=3011
       - MEETING_MODELS_DIR=/app/models
       - MEETING_UPLOAD_DIR=/app/uploads
       - MEETING_DB_PATH=/app/data/meetings.db

@@ -16,52 +16,59 @@
 - 💻 **متعدد المنصات** — يعمل على Windows و Linux
 - 🔄 **قابل للتوسيع** — إضافة نماذج LLM جديدة بسهولة
 
-## 📦 النماذج المستخدمة
+## 📦 النماذج المستخدمة (Core AI Models)
 
-| النموذج | الوظيفة | الحجم |
-|---------|---------|-------|
-| [Falcon-H1-Arabic 7B](https://huggingface.co/tiiuae/Falcon-H1-Arabic-7B-Instruct-GGUF) | تلخيص الاجتماعات | ~5 GB |
-| [Audar-ASR-V1-Flash](https://huggingface.co/audarai/Audar-ASR-V1-Flash-GGUF) | تحويل الصوت لنص | ~500 MB |
-| [pyannote.audio 3.1](https://huggingface.co/pyannote/speaker-diarization-3.1) | فصل المتحدثين | ~100 MB |
+| النموذج | الوظيفة | الحجم | الدقة |
+|---------|---------|-------|-------|
+| [Falcon-H1-7B-Instruct](https://huggingface.co/unsloth/Falcon-H1-7B-Instruct-GGUF) | تلخيص الاجتماعات واستخراج القرارات والمحادثة | ~3.89 GB | IQ4_XS GGUF |
+| [Audar-ASR-V1-Turbo](https://huggingface.co/audarai/Audar-ASR-V1-Turbo) | تفريغ الصوت العربي العام والمحلي بدقة زمنية عالية | ~2.63 GB | Q8_0 GGUF + mmproj |
+| [Cohere Transcribe Arabic](https://huggingface.co/handy-computer/cohere-transcribe-arabic-07-2026-gguf) | محرك إضافي للتفريغ الصوتي واللهجات العربية | ~1.65 GB | Q5_K_M GGUF |
+| [pyannote.audio 3.1](https://huggingface.co/pyannote/speaker-diarization-3.1) | فصل وتحديد هوية المتحدثين عصبياً (100% Offline) | ~32.5 MB | مدمج محلياً ومحمي |
 
 ## 🖥️ متطلبات النظام
 
-- **Python** 3.10+
-- **Node.js** 18+
-- **ffmpeg** (لمعالجة الصوت)
-- **GPU** (موصى): NVIDIA GPU بـ 8+ GB VRAM
-- **RAM**: 16 GB كحد أدنى (للتشغيل على CPU)
+- **نظام التشغيل**: Windows 10/11 أو Linux (Ubuntu/Debian) أو macOS أو Docker.
+- **Python**: 3.10+ (في حال التشغيل المباشر).
+- **Node.js**: 18+ (في حال بناء الواجهة يدوياً).
+- **كرت الشاشة (موصى به)**: كرت NVIDIA (8GB+ VRAM) لدعم تسريع CUDA و Tensor Cores.
+- **المعالج المركزي (CPU)**: 16GB RAM كحد أدنى في حال عدم توفر كرت شاشة.
 
-## 🚀 التشغيل السريع
+---
 
-### 1. تحميل النماذج
+## 🚀 التشغيل السريع (Quickstart)
 
+### الخيار 1: عبر Docker (الأسهل والموصى به)
 ```bash
-pip install huggingface-hub
-python scripts/download_models.py
+# 1. استنساخ المستودع
+git clone https://github.com/[username]/Arabic_Summarization.git
+cd Arabic_Summarization
+
+# 2. تشغيل الحاويات (سيقوم بتثبيت الواجهة والخادم وتفعيل كرت الشاشة تلقائياً)
+docker compose up -d --build
+```
+> **ملاحظة للنماذج الضخمة**: يتم فحص النماذج في مجلد `models/` تلقائياً. إذا كانت غير محملة، يمكنك تحميلها بأمر واحد:
+> ```bash
+> python scripts/download_models.py
+> ```
+
+### الخيار 2: تشغيل محلي فوري (Native)
+
+**على Windows:**
+```cmd
+run.bat
+```
+*(السكربت يقوم تلقائياً بإنشاء البيئة الافتراضية، تثبيت مكتبات CUDA، فحص وتنزيل النماذج، وبناء الواجهة وتشغيل الخادم)*.
+
+**على Linux:**
+```bash
+chmod +x run.sh
+./run.sh
 ```
 
-### 2. التشغيل
-
-**Windows:**
-```bash
-scripts\start.bat
-```
-
-**Linux:**
-```bash
-chmod +x scripts/start.sh
-./scripts/start.sh
-```
-
-**Docker:**
-```bash
-docker-compose up --build
-```
-
-### 3. الاستخدام
-
-افتح المتصفح على `http://localhost:3011`
+### 3. فتح التطبيق
+- افتح المتصفح على: `http://localhost:3011`
+- للوصول من أي جهاز على الشبكة المحلية: `http://[IP-جهازك]:3011`
+- توثيق الـ API التفاعلي: `http://localhost:3011/docs`
 
 للوصول من أجهزة أخرى على الشبكة: `http://[عنوان-IP-جهازك]:3011`
 
