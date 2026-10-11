@@ -130,9 +130,9 @@ class CohereASREngine(BaseASREngine):
 
                 self._start_drain_threads(proc)
 
-                # Wait for ready signal via queue with 120s timeout (allows cold loading from disk)
+                # Wait for ready signal via queue with 180s timeout (allows cold loading from disk)
                 try:
-                    ready_line = self._stdout_queue.get(timeout=120.0)
+                    ready_line = self._stdout_queue.get(timeout=180.0)
                 except queue.Empty:
                     ready_line = None
 
@@ -151,7 +151,8 @@ class CohereASREngine(BaseASREngine):
                     self.process = proc
                     loaded = True
                     actual_backend = resp.get("backend", backend_choice)
-                    logger.info(f"Cohere Transcribe Arabic worker ready using backend='{actual_backend}'.")
+                    worker_threads = resp.get("threads", "auto")
+                    logger.info(f"Cohere Transcribe Arabic worker ready using backend='{actual_backend}' (threads={worker_threads}).")
                     break
                 else:
                     last_error = resp.get("message", "Unknown worker error")

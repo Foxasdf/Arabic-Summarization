@@ -24,6 +24,8 @@ services:
       - MEETING_UPLOAD_DIR=/app/uploads
       - MEETING_DB_PATH=/app/data/meetings.db
       - MEETING_DIARIZATION_BACKEND=auto
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
       - HF_TOKEN=REDACTED_HF_TOKEN
     restart: unless-stopped
 

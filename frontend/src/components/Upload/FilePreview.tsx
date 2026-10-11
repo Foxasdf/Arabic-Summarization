@@ -19,7 +19,7 @@ export const FilePreview: React.FC<FilePreviewProps> = ({
   uploadProgress = 0,
 }) => {
   const [numSpeakers, setNumSpeakers] = React.useState<number>(0);
-  const [asrModel, setAsrModel] = React.useState<string>('audar-asr-v1-turbo');
+  const [asrModel, setAsrModel] = React.useState<string>('cohere-transcribe-arabic');
   const [denoiseMode, setDenoiseMode] = React.useState<string>('none');
   const [isLocalSubmitting, setIsLocalSubmitting] = React.useState<boolean>(false);
 
@@ -106,15 +106,16 @@ export const FilePreview: React.FC<FilePreviewProps> = ({
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
             {[
               {
+                val: 'cohere-transcribe-arabic',
+                name: 'Cohere Transcribe',
+                desc: 'الأعلى دقة للهجات والخلط العربي والإنجليزي',
+                badge: 'مُوصى به للدقة 🌟',
+              },
+              {
                 val: 'audar-asr-v1-turbo',
                 name: 'Audar ASR (GPU)',
                 desc: 'الأعلى سرعة وتوافقاً (تسريع كرت الشاشة)',
-                badge: 'مُوصى به ⚡',
-              },
-              {
-                val: 'cohere-transcribe-arabic',
-                name: 'Cohere Transcribe (CPU)',
-                desc: 'دقيق للهجات والخلط (معالجة CPU)',
+                badge: 'سريع ⚡',
               },
               {
                 val: 'whisper-large-v3-turbo-arabic-dialectal',

@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     DB_PATH: Path = Path(__file__).resolve().parent.parent / "data" / "meetings.db"
     MAX_FILE_SIZE_MB: int = 500
     
-    ASR_MODEL_NAME: str = "audar-asr-v1-turbo"
+    ASR_MODEL_NAME: str = "cohere-transcribe-arabic"
     ASR_GGUF_FILENAME: str = "Audar-ASR-V1-Turbo-Q8_0.gguf"
     ASR_MMPROJ_FILENAME: str = "mmproj-Audar-ASR-V1-Turbo.gguf"
     COHERE_ASR_FILENAME: str = "cohere-transcribe-arabic-07-2026-Q5_K_M.gguf"

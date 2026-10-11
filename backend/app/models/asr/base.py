@@ -546,7 +546,20 @@ class BaseASREngine(BaseModelEngine):
                     for i, sp in enumerate(slice_paths):
                         if sp is not None:
                             results[i] = self.transcribe_slice(sp, dur_sec=slice_durations[i])
+                            try:
+                                sp.unlink()
+                            except OSError:
+                                pass
                         completed_count += 1
+                        if completed_count % 25 == 0:
+                            import gc
+                            gc.collect()
+                            try:
+                                import torch
+                                if torch.cuda.is_available():
+                                    torch.cuda.empty_cache()
+                            except Exception:
+                                pass
                         if on_progress:
                             pct = int(lo + (completed_count / max(1, len(windows))) * (hi - lo))
                             on_progress(pct, f"تفريغ المقطع {completed_count} من {len(windows)}...")

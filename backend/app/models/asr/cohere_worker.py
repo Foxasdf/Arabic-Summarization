@@ -3,6 +3,7 @@ Isolated worker process for Cohere Transcribe Arabic.
 Runs in a dedicated clean Python process to prevent dynamic link library (DLL)
 symbol collisions on Windows between llama-cpp-python and transcribe_cpp (GGML).
 """
+import os
 import sys
 import json
 import logging
@@ -41,8 +42,14 @@ def main():
     model = None
     loaded_backend = None
 
-    # Try preferred backend (auto/vulkan/gpu), fallback to CPU on error
-    backends_to_try = [preferred_backend] if preferred_backend == "cpu" else [preferred_backend, "cpu"]
+    # Probe backends: try vulkan if available, then auto, then cpu
+    backends_to_try = []
+    if preferred_backend in ["auto", "vulkan", "gpu"]:
+        if hasattr(transcribe_cpp, "backend_available") and transcribe_cpp.backend_available("vulkan"):
+            backends_to_try.append("vulkan")
+        backends_to_try.append("auto")
+    backends_to_try.append("cpu")
+
     last_err = None
     for b in backends_to_try:
         try:
@@ -60,10 +67,27 @@ def main():
         sys.stdout.flush()
         sys.exit(1)
 
-    # Signal parent that model is loaded and ready
+    # Optimal thread count: utilize CPU cores fully for 2.0B parameter model
+    cpu_cores = os.cpu_count() or 4
+    optimal_threads = max(4, min(16, cpu_cores - 2))
+
+    # Initialize persistent session for fast sequential slice processing
+    session = None
+    try:
+        session = model.session(n_threads=optimal_threads)
+    except Exception as e:
+        sys.stdout.write(json.dumps({
+            "status": "error",
+            "message": f"Failed to initialize transcribe_cpp session: {e}"
+        }) + "\n")
+        sys.stdout.flush()
+        sys.exit(1)
+
+    # Signal parent that model and session are loaded and ready
     sys.stdout.write(json.dumps({
         "status": "ready",
-        "backend": loaded_backend
+        "backend": loaded_backend,
+        "threads": optimal_threads
     }) + "\n")
     sys.stdout.flush()
 
@@ -110,25 +134,52 @@ def main():
                     sys.stdout.flush()
                     continue
 
-                res = transcribe_cpp.transcribe(model, audio_f32, language="ar")
+                # Run inference on persistent session without per-slice allocation churn
+                res = session.run(audio_f32, language="ar")
                 text = getattr(res, "text", "") or ""
                 # Strip internal Cohere silence/blank tokens like @@@فراغ
                 text = text.replace("@@@فراغ", "").strip()
                 sys.stdout.write(json.dumps({"status": "ok", "text": text}) + "\n")
                 sys.stdout.flush()
             except Exception as e:
-                sys.stdout.write(json.dumps({"status": "error", "message": str(e), "text": ""}) + "\n")
-                sys.stdout.flush()
+                # On session run failure, recreate session once and retry
+                try:
+                    if session and hasattr(session, "close"):
+                        session.close()
+                except Exception:
+                    pass
+                try:
+                    session = model.session(n_threads=optimal_threads)
+                    res = session.run(audio_f32, language="ar")
+                    text = getattr(res, "text", "") or ""
+                    text = text.replace("@@@فراغ", "").strip()
+                    sys.stdout.write(json.dumps({"status": "ok", "text": text}) + "\n")
+                    sys.stdout.flush()
+                except Exception as retry_err:
+                    sys.stdout.write(json.dumps({"status": "error", "message": str(retry_err), "text": ""}) + "\n")
+                    sys.stdout.flush()
             finally:
-                # Explicit cleanup of large audio arrays to prevent memory creep across hundreds of slices
+                # Explicit cleanup of large audio arrays to prevent memory creep
                 raw_audio = None
                 audio_f32 = None
                 res = None
                 slice_count += 1
-                if slice_count % 15 == 0:
+                # Periodically refresh session and garbage collect to guarantee zero memory leaks
+                if slice_count % 30 == 0:
+                    try:
+                        if session and hasattr(session, "close"):
+                            session.close()
+                        session = model.session(n_threads=optimal_threads)
+                    except Exception:
+                        pass
                     import gc
                     gc.collect()
 
+    try:
+        if session and hasattr(session, "close"):
+            session.close()
+    except Exception:
+        pass
     try:
         if hasattr(model, "close"):
             model.close()

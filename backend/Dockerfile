@@ -2,11 +2,13 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies including ffmpeg and build tools
+# Install system dependencies including ffmpeg, vulkan runtime, and build tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
     build-essential \
+    libvulkan1 \
+    vulkan-tools \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
