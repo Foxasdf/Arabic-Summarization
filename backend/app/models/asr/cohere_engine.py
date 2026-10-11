@@ -29,8 +29,10 @@ class CohereASREngine(BaseASREngine):
     on Windows between llama-cpp-python and transcribe_cpp.
     """
 
-    # Cohere inference supports parallel isolated worker processes across available VRAM
-    allow_secondary_workers: bool = True
+    # Cohere runs via transcribe_cpp in an isolated subprocess.
+    # Because transcribe_cpp utilizes multi-threaded CPU inference, running a single
+    # dedicated worker avoids CPU contention, memory duplication, and timeouts.
+    allow_secondary_workers: bool = False
 
     def __init__(self, model_path: Optional[Path] = None):
         default_path = settings.MODELS_DIR / getattr(
@@ -128,9 +130,9 @@ class CohereASREngine(BaseASREngine):
 
                 self._start_drain_threads(proc)
 
-                # Wait for ready signal via queue with 30s timeout
+                # Wait for ready signal via queue with 120s timeout (allows cold loading from disk)
                 try:
-                    ready_line = self._stdout_queue.get(timeout=30.0)
+                    ready_line = self._stdout_queue.get(timeout=120.0)
                 except queue.Empty:
                     ready_line = None
 
@@ -236,13 +238,14 @@ class CohereASREngine(BaseASREngine):
             self.process.stdin.write(json.dumps(req) + "\n")
             self.process.stdin.flush()
 
-            # Wait for response with timeout to prevent hanging on corrupted/repetition loops
+            # Wait for response with generous timeout to allow CPU or complex audio processing
+            slice_timeout = max(180.0, float(dur_sec) * 8.0)
             try:
-                resp_line = self._stdout_queue.get(timeout=35.0)
+                resp_line = self._stdout_queue.get(timeout=slice_timeout)
             except queue.Empty:
                 recent_err = "".join(self._stderr_buffer[-10:]).strip()
                 logger.error(
-                    f"Cohere worker slice transcription timed out after 35s ({slice_wav_path.name})! "
+                    f"Cohere worker slice transcription timed out after {slice_timeout:.0f}s ({slice_wav_path.name})! "
                     f"Recent stderr: {recent_err}"
                 )
                 self.unload()

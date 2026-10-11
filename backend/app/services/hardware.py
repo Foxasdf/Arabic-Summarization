@@ -115,7 +115,7 @@ class HardwareProfile:
         if self.vram_total_gb >= 15.0 and avail_vram >= 8.5:
             return 4  # 24GB GPUs (RTX 3090, RTX 4090, A10G)
         elif self.vram_total_gb >= 10.0 and avail_vram >= 5.0:
-            return 3  # 11GB - 12GB GPUs (RTX 2080 Ti, RTX 3060 12GB, RTX 3080)
+            return 2  # Stable & fast 2x parallel speedup for 11GB - 12GB GPUs (RTX 2080 Ti)
         elif self.vram_total_gb >= 7.5 and avail_vram >= 2.5:
             return 2  # 8GB GPUs (RTX 2070, RTX 2080, RTX 3070)
         return 1

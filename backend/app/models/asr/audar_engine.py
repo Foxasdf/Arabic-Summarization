@@ -21,6 +21,9 @@ class AudarASREngine(BaseASREngine):
     Official Prompt: "فرّغ الكلام العربي التالي."
     """
 
+    # Audar ASR runs on CUDA GPU via llama-cpp-python MTMD and scales across available VRAM
+    allow_secondary_workers: bool = True
+
     def __init__(self, model_path: Path, mmproj_path: Optional[Path] = None):
         super().__init__(model_path)
         self.mmproj_path = Path(mmproj_path) if mmproj_path else self._find_mmproj_path()

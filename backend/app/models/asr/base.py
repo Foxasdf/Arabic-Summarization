@@ -201,7 +201,10 @@ class BaseASREngine(BaseModelEngine):
             for w_idx in range(1, target_workers):
                 try:
                     cls = self.__class__
-                    w = cls(self.model_path)
+                    if hasattr(self, "mmproj_path") and self.mmproj_path:
+                        w = cls(self.model_path, mmproj_path=self.mmproj_path)
+                    else:
+                        w = cls(self.model_path)
                     w.load()
                     extra_engines.append(w)
                     logger.info(f"Initialized parallel ASR worker #{len(extra_engines)+1} for {cls.__name__}")
@@ -270,7 +273,15 @@ class BaseASREngine(BaseModelEngine):
                             return idx, ""
                         worker_eng = engine_q.get()
                         try:
-                            return idx, worker_eng.transcribe_slice(p, dur_sec=dur)
+                            try:
+                                return idx, worker_eng.transcribe_slice(p, dur_sec=dur)
+                            except Exception as worker_err:
+                                logger.warning(f"ASR worker slice {idx} failed ({worker_err}), retrying on primary engine...")
+                                try:
+                                    return idx, self.transcribe_slice(p, dur_sec=dur)
+                                except Exception as fallback_err:
+                                    logger.error(f"Fallback slice {idx} transcription also failed: {fallback_err}")
+                                    return idx, ""
                         finally:
                             engine_q.put(worker_eng)
 
@@ -280,8 +291,11 @@ class BaseASREngine(BaseModelEngine):
                             for idx_k, item in enumerate(slice_info)
                         ]
                         for fut in as_completed(futures):
-                            idx, text = fut.result()
-                            results[idx] = text
+                            try:
+                                idx, text = fut.result()
+                                results[idx] = text
+                            except Exception as fut_err:
+                                logger.error(f"Error retrieving slice transcription from parallel future: {fut_err}")
                             completed_count += 1
                             if on_progress:
                                 pct = int(lo + (completed_count / max(1, len(slice_info))) * (hi - lo))
