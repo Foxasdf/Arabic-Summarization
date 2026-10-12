@@ -110,8 +110,13 @@ echo.
 echo ========================================================
 echo   جاري تشغيل الخادم على المنفذ 3011...
 echo   افتح المتصفح على: http://localhost:3011
+echo   أو الرابط البديل:  http://127.0.0.1:3011
+echo   (تنبيه: لا تفتح 0.0.0.0 - وأوقف إضافة الـ VPN إن وجدت)
 echo ========================================================
 echo.
+
+:: فتح المتصفح تلقائياً بمجرد بدء السيرفر
+start "" cmd /c "timeout /t 2 /nobreak >nul && start http://localhost:3011"
 
 cd /d "%PROJECT_ROOT%backend"
 python -m uvicorn app.main:app --host 0.0.0.0 --port 3011 --timeout-keep-alive 3600

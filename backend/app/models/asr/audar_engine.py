@@ -23,6 +23,8 @@ class AudarASREngine(BaseASREngine):
 
     # Audar ASR runs on CUDA GPU via llama-cpp-python MTMD and scales across available VRAM
     allow_secondary_workers: bool = True
+    chunk_len: float = 15.0
+    overlap: float = 2.5
 
     def __init__(self, model_path: Path, mmproj_path: Optional[Path] = None):
         super().__init__(model_path)
@@ -150,11 +152,11 @@ class AudarASREngine(BaseASREngine):
         try:
             media_marker = self.handler._mtmd_cpp.mtmd_default_marker().decode("utf-8")
             
-            # Dialect-aware system prompt tuned for Levantine / Syrian speech without Egyptian hallucinations
+            # Official default system prompt for Audar-ASR
             sys_prompt = getattr(
                 settings,
                 "AUDAR_SYSTEM_PROMPT",
-                "فرّغ التسجيل الصوتي بدقة تامة باللهجة الشامية/السورية المنطوقة، مع الالتزام التام بالمفردات المنطوقة.",
+                "فرّغ الكلام العربي التالي.",
             )
             prompt_text = (
                 f"<|im_start|>system\n{sys_prompt}<|im_end|>\n"
@@ -220,14 +222,14 @@ class AudarASREngine(BaseASREngine):
 
             self.handler._mtmd_cpp.mtmd_input_chunks_free(chunks)
 
-            # Priority 3: Dynamic max_tokens based on slice length
-            # Arabic speech rate is ~2.5 - 3.5 words/sec, each Arabic word ~1.5 - 2 tokens
-            # Safe token budget: dur_sec * 12.0 tokens (max 384, min 24)
-            dyn_tokens = int(max(24, min(384, (dur_sec or 10.0) * 12.0)))
-            repeat_penalty = float(getattr(settings, "AUDAR_REPEAT_PENALTY", 1.20))
-            frequency_penalty = float(getattr(settings, "AUDAR_FREQUENCY_PENALTY", 0.10))
+            # Dynamic max_tokens based on slice length
+            # Arabic speech rate is ~2.5 - 3.5 words/sec, each Arabic word ~1.5 - 2.5 tokens
+            # Safe token budget: dur_sec * 16.0 tokens (max 440, min 64)
+            dyn_tokens = int(max(64, min(440, (dur_sec or 10.0) * 16.0)))
+            repeat_penalty = float(getattr(settings, "AUDAR_REPEAT_PENALTY", 1.0))
+            frequency_penalty = float(getattr(settings, "AUDAR_FREQUENCY_PENALTY", 0.0))
 
-            # Priority 3: Explicit stop tokens to stop hallucination loops
+            # Explicit stop tokens to stop generation cleanly
             out = self.model.create_completion(
                 prompt=self.model.input_ids[: self.model.n_tokens].tolist(),
                 max_tokens=dyn_tokens,
@@ -238,6 +240,14 @@ class AudarASREngine(BaseASREngine):
                 stop=["<|im_end|>", "<|endoftext|>", "<|im_start|>", "\n<|im_start|>", "\n\n\n"],
             )
             raw_text = out["choices"][0]["text"].strip()
+
+            # Handle Audar no-speech protocol
+            if "language None" in raw_text:
+                return ""
+
+            # Strip language tags and special format tokens
+            raw_text = re.sub(r"^language\s+[A-Za-z]+(<asr_text>)?\s*", "", raw_text).strip()
+            raw_text = raw_text.replace("<asr_text>", "").replace("<|im_end|>", "").strip()
             return raw_text
 
         finally:

@@ -12,9 +12,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
+COPY wheels/ /tmp/wheels/
 
 # تثبيت الحزم مع دعم NVIDIA CUDA وتضمين مكتبات تشغيل CUDA 12 Runtime
-RUN pip install --no-cache-dir --default-timeout=1000 \
+# يدعم استخدام حزم الـ Wheel المحلية من /tmp/wheels إذا تم تحميلها مسبقاً
+RUN pip install --no-cache-dir --default-timeout=1000 --retries 10 \
+    --find-links /tmp/wheels \
     -r requirements.txt \
     --extra-index-url https://download.pytorch.org/whl/cu124 \
     --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124 \

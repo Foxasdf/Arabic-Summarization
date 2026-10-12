@@ -78,11 +78,13 @@ def print_startup_banner():
         f"   التفريغ المتوازي (Parallel ASR): {workers_str}",
         f"   حالة النماذج (Models):        {models_status}",
         f"   الرابط المحلي (Local):         http://localhost:{port}",
+        f"   الرابط البديل (Alternative):   http://127.0.0.1:{port}",
     ]
     if local_ip:
         banner_lines.append(f"   الشبكة المحلية (Network):     http://{local_ip}:{port}")
     banner_lines.extend([
         f"   توثيق الـ API (Docs):          http://localhost:{port}/docs",
+        "   [تنبيه]: لا تفتح 0.0.0.0 في المتصفح - وأوقف إضافة الـ VPN إن وجدت",
         "   للإيقاف (Stop):                اضغط Ctrl+C",
         "=" * 64,
         "",

@@ -12,8 +12,13 @@ from pydantic import BaseModel
 
 from ..config import settings
 from ..models.registry import registry
-from ..services.audio_processor import convert_to_wav, get_audio_duration, estimate_processing_time
-from ..services.transcription import transcribe_audio
+from ..services.audio_processor import (
+    convert_to_wav,
+    process_dual_profile_audio,
+    get_audio_duration,
+    estimate_processing_time,
+)
+from ..services.transcription import transcribe_audio, transcribe_with_speakers
 from ..services.diarization import diarize, diarization_backend_name
 from ..services.alignment import align_timestamps
 from ..services.summarization import summarize_meeting
@@ -134,16 +139,19 @@ async def transcribe_endpoint(
                     denoise_label = f" (عزل: {mode_str})"
                 else:
                     denoise_label = ""
+                spk_wav_path = settings.UPLOAD_DIR / f"{file_id}.speaker.16k.wav"
                 yield _sse({"step": "preprocessing", "progress": 3, "message": f"جاري تجهيز وتنقية الملف الصوتي{denoise_label}..."})
-                if not await convert_to_wav(files[0], wav_path, denoise_mode=denoise_mode):
-                    raise RuntimeError("فشل تحويل وتنقية الملف الصوتي (ffmpeg)")
-                yield _sse({"step": "preprocessing", "progress": 8, "message": "تم تحويل وتنقية الملف الصوتي بنجاح"})
+                ok, err = await process_dual_profile_audio(files[0], wav_path, spk_wav_path, denoise_mode=denoise_mode)
+                if not ok:
+                    raise RuntimeError(f"فشل تحويل وتنقية الملف الصوتي (ffmpeg): {err or ''}")
+                yield _sse({"step": "preprocessing", "progress": 8, "message": "تم تحويل وتنقية وتجهيز مسارات الصوت بنجاح"})
 
                 backend_label = "Pyannote 3.1 (NVIDIA GPU)"
                 yield _sse({"step": "diarization", "progress": 10,
                             "message": f"جاري فصل وتحديد المتحدثين ({backend_label})..."})
                 turns = None
-                async for kind, val in _run_with_progress(diarize, wav_path, num_speakers):
+                # Diarization strictly consumes canonical unprocessed speaker audio
+                async for kind, val in _run_with_progress(diarize, spk_wav_path, num_speakers):
                     if kind == "progress":
                         yield _sse({"step": "diarization", "progress": val[0], "message": val[1]})
                     elif kind == "heartbeat":
@@ -165,12 +173,13 @@ async def transcribe_endpoint(
                 except Exception:
                     pass
 
-                # Full-coverage continuous ASR + Pyannote speaker alignment:
-                # Guarantees zero dropped words across the entire meeting while accurately assigning speaker turns
-                yield _sse({"step": "asr", "progress": 25, "message": "جاري تفريغ الصوت بنموذج ASR (تغطية كاملة للكلام)..."})
-                asr_result = None
+                # Speaker-aware ASR:
+                # Transcribes each speaker turn using the chosen ASR engine (Cohere/Audar/Whisper),
+                # guaranteeing exact speaker attribution with zero word mixing or fragmentation
+                yield _sse({"step": "asr", "progress": 25, "message": "جاري تفريغ الصوت وتنسيق المتحدثين..."})
+                segments = None
                 async for kind, val in _run_with_progress(
-                    transcribe_audio, wav_path, model_identifier=asr_model, progress_range=(25, 92)
+                    transcribe_with_speakers, wav_path, turns, model_identifier=asr_model, progress_range=(25, 95)
                 ):
                     if kind == "progress":
                         yield _sse({"step": "asr", "progress": val[0], "message": val[1]})
@@ -179,11 +188,10 @@ async def transcribe_endpoint(
                     elif kind == "error":
                         raise val
                     else:
-                        asr_result = val
+                        segments = val
 
-                yield _sse({"step": "alignment", "progress": 93, "message": "جاري مطابقة وتوزيع المتحدثين على النص (Pyannote)..."})
-                words = asr_result.get("words", []) if asr_result else []
-                segments = align_timestamps(words, turns)
+                if not segments:
+                    segments = []
 
             yield _sse({"step": "alignment", "progress": 97, "message": "جاري حفظ نتائج التفريغ..."})
             old = meeting.get("speakers_json") or {}

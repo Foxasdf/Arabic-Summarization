@@ -81,10 +81,10 @@ def build_audio_filter_chain(denoise_mode: Optional[str] = None) -> str:
         return "highpass=f=50"
     elif mode in ("moderate", "dynamic"):
         # Moderate / dynamic: Gentle highpass + mild FFT spectral noise reduction without gating
-        return "highpass=f=60,lowpass=f=7800,afftdn=nf=-25:nr=6:tn=1"
+        return "highpass=f=60,lowpass=f=7800,afftdn=nf=-25:nr=6:tn=0"
     elif mode == "high":
         # High noise reduction: Stronger spectral denoise for noisy environments, strictly without gating
-        return "highpass=f=75,lowpass=f=7500,afftdn=nf=-20:nr=10:tn=1"
+        return "highpass=f=75,lowpass=f=7500,afftdn=nf=-20:nr=10:tn=0"
     
     return ""
 
@@ -95,10 +95,48 @@ async def convert_to_wav(
     denoise_mode: Optional[str] = None,
 ) -> bool:
     """
-    Convert any audio file to 16kHz mono WAV using ffmpeg with optional denoising.
-    Handles same-file overwrite by converting to a temp file first.
+    Convert any audio file to 16kHz mono WAV using the unified preprocessing engine
+    with optional denoising, phase-aware channel downmixing, and transactional writing.
     """
     logger.info(f"Converting and cleaning audio {input_path} -> {output_path} (mode={denoise_mode or 'auto'})")
+    try:
+        from .preprocessing import (
+            PreprocessingEngine,
+            AudioProcessingRequest,
+            OutputProfile,
+            DenoiseMode,
+        )
+
+        engine = PreprocessingEngine()
+        # Parse denoise mode using contract
+        clean_mode = (denoise_mode or "raw").strip().lower()
+        try:
+            req = AudioProcessingRequest(
+                output_profile=OutputProfile.ASR,
+                denoise_mode=clean_mode,
+            )
+        except Exception:
+            req = AudioProcessingRequest(
+                output_profile=OutputProfile.ASR,
+                denoise_mode=DenoiseMode.RAW,
+            )
+
+        job_dir = output_path.parent / f".job_{output_path.stem}"
+        res = engine.process(input_path, req, job_dir)
+        if res.success and "asr" in res.output_files:
+            staged_asr = Path(res.output_files["asr"])
+            if staged_asr.exists():
+                if output_path.resolve() != staged_asr.resolve():
+                    shutil.move(str(staged_asr), str(output_path))
+                # Cleanup job dir if empty
+                if job_dir.exists():
+                    shutil.rmtree(job_dir, ignore_errors=True)
+                return True
+
+    except Exception as e:
+        logger.warning(f"Unified PreprocessingEngine encountered an error: {e}. Attempting direct fallback.")
+
+    # Direct FFmpeg fallback if needed
     try:
         ffmpeg_bin = get_ffmpeg_binary()
         temp_output = output_path.with_suffix(".tmp.wav") if input_path.resolve() == output_path.resolve() else output_path
@@ -125,12 +163,99 @@ async def convert_to_wav(
                 shutil.move(str(temp_output), str(output_path))
             return True
         else:
-            logger.error(f"FFmpeg failed with code {process.returncode}: {process.stderr.decode('utf-8', errors='ignore')[:300]}")
+            logger.error(f"FFmpeg fallback failed with code {process.returncode}: {process.stderr.decode('utf-8', errors='ignore')[:300]}")
             return False
             
     except Exception as e:
         logger.error(f"FFmpeg conversion error: {e}")
         return False
+
+
+async def process_dual_profile_audio(
+    input_path: Path,
+    asr_output_path: Path,
+    speaker_output_path: Path,
+    denoise_mode: Optional[str] = None,
+) -> tuple[bool, Optional[str]]:
+    """
+    Execute strict profile separation (Production v3.1):
+    1. ASR Profile: 16kHz mono, phase-aware downmix, conditional rumble highpass, evaluated denoiser preset.
+    2. Speaker Profile: 16kHz mono, canonical UNPROCESSED audio (no denoise, no compression, no gain).
+    Both profiles are derived independently from the immutable source input_path.
+    Returns (success, error_message_if_any).
+    """
+    try:
+        from .preprocessing import (
+            PreprocessingEngine,
+            AudioProcessingRequest,
+            OutputProfile,
+            DenoiseMode,
+        )
+
+        engine = PreprocessingEngine()
+
+        # Build requests for ASR and Speaker
+        clean_mode = (denoise_mode or "raw").strip().lower()
+        try:
+            asr_req = AudioProcessingRequest(
+                output_profile=OutputProfile.ASR,
+                denoise_mode=clean_mode,
+            )
+        except Exception:
+            asr_req = AudioProcessingRequest(
+                output_profile=OutputProfile.ASR,
+                denoise_mode=DenoiseMode.RAW,
+            )
+
+        spk_req = AudioProcessingRequest(
+            output_profile=OutputProfile.SPEAKER,
+            # Speaker defaults to RAW denoise and OFF normalization
+        )
+
+        job_dir = asr_output_path.parent / f".dual_{asr_output_path.stem}"
+        res = engine.process(input_path, [asr_req, spk_req], job_dir)
+
+        if not res.success:
+            return False, "Dual profile preprocessing engine reported failure."
+
+        # Move published artifacts to final target paths
+        published_asr = Path(res.output_files.get("asr", ""))
+        published_spk = Path(res.output_files.get("speaker", ""))
+
+        if not published_asr.exists() or not published_spk.exists():
+            return False, "Published artifact files were not found in staging."
+
+        if asr_output_path.resolve() != published_asr.resolve():
+            shutil.move(str(published_asr), str(asr_output_path))
+
+        if speaker_output_path.resolve() != published_spk.resolve():
+            shutil.move(str(published_spk), str(speaker_output_path))
+
+        # Copy manifest alongside artifacts
+        manifest_src = Path(res.manifest_path)
+        manifest_dst = asr_output_path.parent / f"{asr_output_path.stem.replace('.16k', '')}.manifest.json"
+        if manifest_src.exists():
+            shutil.copy2(str(manifest_src), str(manifest_dst))
+
+        # Cleanup temporary job dir
+        if job_dir.exists():
+            shutil.rmtree(job_dir, ignore_errors=True)
+
+        logger.info(
+            f"Dual profile processing complete: ASR={asr_output_path.name}, "
+            f"Speaker={speaker_output_path.name}, Manifest={manifest_dst.name}."
+        )
+        return True, None
+
+    except Exception as e:
+        logger.error(f"Dual profile processing failed: {e}", exc_info=True)
+        # Fallback: create both via convert_to_wav
+        try:
+            ok_asr = await convert_to_wav(input_path, asr_output_path, denoise_mode=denoise_mode)
+            ok_spk = await convert_to_wav(input_path, speaker_output_path, denoise_mode="raw")
+            return (ok_asr and ok_spk), str(e) if not (ok_asr and ok_spk) else None
+        except Exception as e2:
+            return False, str(e2)
 
 
 def get_audio_duration(path: Path) -> float:

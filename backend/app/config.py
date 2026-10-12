@@ -40,21 +40,18 @@ class Settings(BaseSettings):
     DB_PATH: Path = Path(__file__).resolve().parent.parent / "data" / "meetings.db"
     MAX_FILE_SIZE_MB: int = 500
     
-    ASR_MODEL_NAME: str = "cohere-transcribe-arabic"
-    ASR_GGUF_FILENAME: str = "Audar-ASR-V1-Turbo-Q8_0.gguf"
+    ASR_MODEL_NAME: str = "cohere-transcribe-arabic-07-2026-Q5_K_M.gguf"
+    ASR_GGUF_FILENAME: str = "cohere-transcribe-arabic-07-2026-Q5_K_M.gguf"
     ASR_MMPROJ_FILENAME: str = "mmproj-Audar-ASR-V1-Turbo.gguf"
     COHERE_ASR_FILENAME: str = "cohere-transcribe-arabic-07-2026-Q5_K_M.gguf"
     WHISPER_DIALECTAL_DIRNAME: str = "whisper-large-v3-turbo-arabic-dialectal-v2-ct2"
     ASR_NUM_WORKERS: int = 0  # 0 = auto-detect (scales dynamically: 3 workers on 11GB RTX 2080 Ti), or explicitly 1-4
     ASR_BATCH_SIZE: int = 0   # 0 = auto-detect (1024 on >=10GB VRAM, else 512), or custom override
 
-    # Audar ASR Dialect & Generation Parameters (Tuned for Levantine / Syrian speech)
-    AUDAR_SYSTEM_PROMPT: str = (
-        "فرّغ التسجيل الصوتي بدقة تامة باللهجة الشامية/السورية."
-        "مع الالتزام التام بالمفردات المنطوقة."
-    )
-    AUDAR_REPEAT_PENALTY: float = 1.20
-    AUDAR_FREQUENCY_PENALTY: float = 0.10
+    # Audar ASR Default Generation Parameters (Official default prompt & greedy decoding)
+    AUDAR_SYSTEM_PROMPT: str = "فرّغ الكلام العربي التالي."
+    AUDAR_REPEAT_PENALTY: float = 1.0
+    AUDAR_FREQUENCY_PENALTY: float = 0.0
     
     LLM_MODEL_NAME: str = "Falcon-H1-7B-Instruct"
     LLM_GGUF_FILENAME: str = "Falcon-H1-7B-Instruct-IQ4_XS.gguf"
@@ -93,6 +90,11 @@ class Settings(BaseSettings):
     # ASR Guardrails & Repetition Penalties
     ASR_REPEAT_PENALTY: float = 1.15
     ASR_GUARDRAILS_ENABLED: bool = True
+    ASR_MODE: str = "continuous_vad"  # "continuous_vad" (default) or "per_turn"
+    ASR_CHUNK_SECONDS: float = 25.0
+    ASR_OVERLAP_SECONDS: float = 2.5
+    ASR_MIN_SILENCE_MS: int = 300
+    PIPELINE_VERSION: str = "v2"
 
     HF_TOKEN: Optional[str] = os.getenv("HF_TOKEN") or None
 

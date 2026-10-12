@@ -135,14 +135,29 @@ def main():
                     continue
 
                 # Run inference on persistent session without per-slice allocation churn
-                res = session.run(audio_f32, language="ar")
-                text = getattr(res, "text", "") or ""
+                try:
+                    res = session.run(audio_f32, language="ar")
+                    text = getattr(res, "text", "") or ""
+                except transcribe_cpp.errors.OutputTruncated as trunc_err:
+                    partial = getattr(trunc_err, "partial_result", None)
+                    text = getattr(partial, "text", "") if partial else ""
+                    if not text:
+                        raise trunc_err
+
                 # Strip internal Cohere silence/blank tokens like @@@فراغ
                 text = text.replace("@@@فراغ", "").strip()
                 sys.stdout.write(json.dumps({"status": "ok", "text": text}) + "\n")
                 sys.stdout.flush()
             except Exception as e:
-                # On session run failure, recreate session once and retry
+                # If error had partial_result, extract it
+                partial = getattr(e, "partial_result", None)
+                partial_text = (getattr(partial, "text", "") if partial else "").replace("@@@فراغ", "").strip()
+                if partial_text:
+                    sys.stdout.write(json.dumps({"status": "ok", "text": partial_text}) + "\n")
+                    sys.stdout.flush()
+                    continue
+
+                # On session run failure, recreate session once and retry with slightly trimmed audio (removes trailing breath/silence loop)
                 try:
                     if session and hasattr(session, "close"):
                         session.close()
@@ -150,13 +165,26 @@ def main():
                     pass
                 try:
                     session = model.session(n_threads=optimal_threads)
-                    res = session.run(audio_f32, language="ar")
-                    text = getattr(res, "text", "") or ""
+                    # Trim 0.15s off the end if audio is long enough to avoid trailing silence loops
+                    retry_audio = audio_f32
+                    if len(audio_f32) > int(sr * 0.8):
+                        retry_audio = audio_f32[:-int(sr * 0.15)]
+                    try:
+                        res = session.run(retry_audio, language="ar")
+                        text = getattr(res, "text", "") or ""
+                    except transcribe_cpp.errors.OutputTruncated as r_trunc:
+                        r_part = getattr(r_trunc, "partial_result", None)
+                        text = getattr(r_part, "text", "") if r_part else ""
                     text = text.replace("@@@فراغ", "").strip()
                     sys.stdout.write(json.dumps({"status": "ok", "text": text}) + "\n")
                     sys.stdout.flush()
                 except Exception as retry_err:
-                    sys.stdout.write(json.dumps({"status": "error", "message": str(retry_err), "text": ""}) + "\n")
+                    r_part = getattr(retry_err, "partial_result", None)
+                    r_text = (getattr(r_part, "text", "") if r_part else "").replace("@@@فراغ", "").strip()
+                    if r_text:
+                        sys.stdout.write(json.dumps({"status": "ok", "text": r_text}) + "\n")
+                    else:
+                        sys.stdout.write(json.dumps({"status": "error", "message": str(retry_err), "text": ""}) + "\n")
                     sys.stdout.flush()
             finally:
                 # Explicit cleanup of large audio arrays to prevent memory creep

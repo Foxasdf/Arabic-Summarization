@@ -579,23 +579,29 @@ def _normalize_turns(turns: List[Dict]) -> List[Dict]:
     all_clean.sort(key=lambda t: (t["start"], t["end"]))
 
     # 3. Handle interjections and floor handovers:
-    # Short interjections (<= 1.8s) nested inside a different speaker's longer turn
+    # Meaningful interjections (>= 0.75s and <= 2.0s) nested inside a different speaker's longer turn
     # partition the primary turn so the interjection receives its own floor turn.
-    interjections = [t for t in all_clean if (t["end"] - t["start"]) <= 1.8]
-    long_turns = [t for t in all_clean if (t["end"] - t["start"]) > 1.8]
+    # Micro-turns (< 0.75s) nested inside another speaker's turn are vocal bleed/artifacts and do NOT punch holes.
+    interjections = [t for t in all_clean if (t["end"] - t["start"]) <= 2.0]
+    long_turns = [t for t in all_clean if (t["end"] - t["start"]) > 2.0]
 
     current_turns = list(long_turns)
     for inj in interjections:
         new_turns: List[Dict] = []
         punched = False
+        inj_dur = inj["end"] - inj["start"]
         for lt in current_turns:
             if lt["speaker"] != inj["speaker"] and lt["start"] <= inj["start"] and inj["end"] <= lt["end"]:
-                if inj["start"] - lt["start"] >= 0.25:
-                    new_turns.append({"speaker": lt["speaker"], "start": lt["start"], "end": inj["start"]})
-                new_turns.append(dict(inj))
-                if lt["end"] - inj["end"] >= 0.25:
-                    new_turns.append({"speaker": lt["speaker"], "start": inj["end"], "end": lt["end"]})
-                punched = True
+                if inj_dur >= 0.75:
+                    if inj["start"] - lt["start"] >= 0.35:
+                        new_turns.append({"speaker": lt["speaker"], "start": lt["start"], "end": inj["start"]})
+                    new_turns.append(dict(inj))
+                    if lt["end"] - inj["end"] >= 0.35:
+                        new_turns.append({"speaker": lt["speaker"], "start": inj["end"], "end": lt["end"]})
+                    punched = True
+                else:
+                    new_turns.append(lt)
+                    punched = True
             else:
                 new_turns.append(lt)
         if not punched:

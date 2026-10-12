@@ -13,6 +13,8 @@ env/
 .pytest_cache/
 .coverage
 htmlcov/
+backend/wheels/*.whl
+!backend/wheels/.gitkeep
 
 # Node
 node_modules/

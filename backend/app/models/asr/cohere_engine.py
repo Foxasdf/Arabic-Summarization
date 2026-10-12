@@ -39,6 +39,8 @@ class CohereASREngine(BaseASREngine):
             settings, "COHERE_ASR_FILENAME", "cohere-transcribe-arabic-07-2026-Q5_K_M.gguf"
         )
         super().__init__(model_path or default_path)
+        self.chunk_len = float(getattr(settings, "ASR_CHUNK_SECONDS", 25.0))
+        self.overlap = float(getattr(settings, "ASR_OVERLAP_SECONDS", 2.5))
         self.process: Optional[subprocess.Popen] = None
         self._worker_script = Path(__file__).resolve().parent / "cohere_worker.py"
         self._stdout_queue: queue.Queue = queue.Queue()

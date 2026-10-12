@@ -43,12 +43,18 @@ def clean_and_guard_asr_text(text: str, dur_sec: Optional[float] = None) -> str:
     if not text:
         return ""
 
+    if "language None" in text:
+        return ""
+
     # 1. Remove special tokens
     for tag in [
         "<|im_end|>", "<|im_start|>", "<|endoftext|>", "<asr_text>",
-        "language Arabic", "language None", "<s>", "</s>",
+        "language Arabic", "language English", "language None", "<s>", "</s>",
     ]:
         text = text.replace(tag, "")
+
+    # Collapse character repetitions (e.g. elongation 'اااااا...' or laughter 'هههههه...')
+    text = re.sub(r"(.)\1{3,}", r"\1\1", text)
 
     # 2. Normalize bracketed words / artifacts
     replacements = {

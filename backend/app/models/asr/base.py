@@ -12,6 +12,7 @@ import subprocess
 from pathlib import Path
 from abc import abstractmethod
 from typing import Optional, Callable, Dict, List, Any
+import numpy as np
 
 from ..base import BaseModelEngine
 from ...config import settings
@@ -78,7 +79,7 @@ class BaseASREngine(BaseModelEngine):
     @staticmethod
     def plan_windows(
         turns: List[Dict[str, Any]],
-        max_len: float = 24.0,
+        max_len: float = 15.0,
         min_len: float = 0.25,
         max_same_speaker_gap: float = 2.5,
     ) -> List[Dict[str, Any]]:
@@ -139,6 +140,137 @@ class BaseASREngine(BaseModelEngine):
 
         return windows
 
+    @staticmethod
+    def plan_vad_chunks(
+        audio_data: Optional[Any],
+        sr: int,
+        total_duration: float,
+        target_chunk_len: float = 25.0,
+        min_chunk_len: float = 18.0,
+        max_chunk_len: float = 30.0,
+        overlap: float = 2.0,
+        min_silence_sec: float = 0.25,
+    ) -> List[Dict[str, Any]]:
+        """
+        Build optimal ASR chunks guided by silence / lowest acoustic energy:
+        1. Targets 20-30s chunks to maintain maximum dialectal language model context.
+        2. Searches around target boundary for the longest silence run (>= min_silence_sec)
+           or absolute minimal RMS energy frame to avoid severing words mid-utterance.
+        3. Preserves consistent overlap between adjacent chunks for seam deduplication.
+        """
+        if total_duration <= max_chunk_len:
+            return [{"idx": 0, "start": 0.0, "dur": round(total_duration, 2)}]
+
+        if audio_data is None:
+            step = max(1.0, target_chunk_len - overlap)
+            n_chunks = max(1, int((total_duration + step - 1) // step))
+            slices = []
+            for i in range(n_chunks):
+                st = i * step
+                d = min(target_chunk_len, total_duration - st)
+                if d <= 0.3:
+                    break
+                slices.append({"idx": i, "start": round(st, 2), "dur": round(d, 2)})
+            return slices
+
+        data = audio_data
+        if data.ndim > 1:
+            data = data.mean(axis=1)
+        if np.issubdtype(data.dtype, np.integer):
+            data_f = data.astype(np.float32) / float(np.iinfo(data.dtype).max)
+        else:
+            data_f = data.astype(np.float32)
+
+        frame_ms = 0.05
+        frame_len = int(frame_ms * sr)
+        n_frames = len(data_f) // max(1, frame_len)
+        if n_frames < 2:
+            return [{"idx": 0, "start": 0.0, "dur": round(total_duration, 2)}]
+
+        rms_arr = np.zeros(n_frames, dtype=np.float32)
+        for k in range(n_frames):
+            rms_arr[k] = np.sqrt(np.mean(data_f[k * frame_len : (k + 1) * frame_len] ** 2) + 1e-9)
+        rms_db = 20.0 * np.log10(rms_arr + 1e-9)
+
+        chunks: List[Dict[str, Any]] = []
+        cur_start = 0.0
+        idx = 0
+        silence_thresh = getattr(settings, "VAD_MIN_RMS_DB", -42.0)
+
+        while cur_start < total_duration:
+            if cur_start + max_chunk_len >= total_duration:
+                dur = round(total_duration - cur_start, 2)
+                if dur > 0.3:
+                    chunks.append({"idx": idx, "start": round(cur_start, 2), "dur": dur})
+                break
+
+            search_st = cur_start + min_chunk_len
+            search_en = min(total_duration, cur_start + max_chunk_len)
+            f_st = int(search_st / frame_ms)
+            f_en = min(n_frames, int(search_en / frame_ms))
+
+            if f_en <= f_st:
+                best_cut = cur_start + target_chunk_len
+            else:
+                win_db = rms_db[f_st:f_en]
+                is_silent = win_db < silence_thresh
+                longest_silence = 0
+                cur_silence = 0
+                silence_center_f = -1
+
+                for fi, sil in enumerate(is_silent):
+                    if sil:
+                        cur_silence += 1
+                        if cur_silence > longest_silence:
+                            longest_silence = cur_silence
+                            silence_center_f = fi - cur_silence // 2
+                    else:
+                        cur_silence = 0
+
+                if longest_silence * frame_ms >= min_silence_sec and silence_center_f >= 0:
+                    best_cut = (f_st + silence_center_f) * frame_ms
+                else:
+                    min_f = int(np.argmin(win_db))
+                    best_cut = (f_st + min_f) * frame_ms
+
+            dur = round(best_cut - cur_start, 2)
+            chunks.append({"idx": idx, "start": round(cur_start, 2), "dur": dur})
+            idx += 1
+            cur_start = max(0.0, round(best_cut - overlap, 2))
+
+        return chunks
+
+    @staticmethod
+    def _find_word_overlap(tail_words: List[str], head_words: List[str]) -> int:
+        """
+        Find number of overlapping boundary words between tail of previous chunk
+        and head of current chunk using Arabic-normalized string matching.
+        """
+        def _norm_w(w: str) -> str:
+            w = re.sub(r"[،,.\?!؟;:\"\'\-\(\)\[\]]", "", w).strip()
+            w = re.sub(r"[إأآٱ]", "ا", w)
+            w = re.sub(r"ة", "ه", w)
+            w = re.sub(r"ى", "ي", w)
+            return w
+
+        tail_norm = [_norm_w(w) for w in tail_words]
+        head_norm = [_norm_w(w) for w in head_words]
+
+        # 1. Exact normalized match from largest to smallest
+        max_k = min(len(tail_norm), len(head_norm))
+        for k in range(max_k, 0, -1):
+            if tail_norm[-k:] == head_norm[:k]:
+                return k
+
+        # 2. Fuzzy match for k >= 3 words if one word had a minor variation
+        for k in range(min(max_k, 12), 2, -1):
+            t_sub = tail_norm[-k:]
+            h_sub = head_norm[:k]
+            matches = sum(1 for a, b in zip(t_sub, h_sub) if a == b or a.startswith(b) or b.startswith(a))
+            if matches >= k - 1 and (matches / k) >= 0.75:
+                return k
+        return 0
+
     def transcribe(
         self,
         audio_path: Path,
@@ -148,7 +280,7 @@ class BaseASREngine(BaseModelEngine):
     ) -> Dict[str, Any]:
         """
         Transcribe continuous audio file of any duration.
-        Automatically chunks audio into 25-second windows with 2-second overlap,
+        Automatically chunks audio into windows with overlap,
         applies VAD to skip silence/noise, and deduplicates the overlap region.
         """
         if not self.is_loaded():
@@ -158,26 +290,6 @@ class BaseASREngine(BaseModelEngine):
         if max_duration_seconds and total_duration > max_duration_seconds:
             logger.info(f"Limiting transcription to first {max_duration_seconds}s of {total_duration}s")
             total_duration = max_duration_seconds
-
-        chunk_len = 25.0
-        overlap = 2.0
-        step = chunk_len - overlap
-        ffmpeg_bin = get_ffmpeg_binary()
-
-        chunks_count = max(1, int((total_duration + step - 1) // step))
-        logger.info(f"Starting ASR on {audio_path.name} (Duration: {total_duration}s, {chunks_count} chunks)")
-
-        slice_info = []
-        for i in range(chunks_count):
-            start_sec = i * step
-            dur_sec = min(chunk_len, total_duration - start_sec)
-            if dur_sec <= 0.3:
-                break
-            slice_info.append({
-                "idx": i,
-                "start": start_sec,
-                "dur": dur_sec,
-            })
 
         # Load audio into memory once for high-speed slicing without invoking 100+ ffmpeg processes
         audio_data = None
@@ -190,6 +302,21 @@ class BaseASREngine(BaseModelEngine):
                 sr = sr_read
         except Exception:
             audio_data = None
+
+        chunk_len = float(getattr(self, "chunk_len", getattr(settings, "ASR_CHUNK_SECONDS", 25.0)))
+        overlap = float(getattr(self, "overlap", getattr(settings, "ASR_OVERLAP_SECONDS", 2.5)))
+        min_silence_ms = float(getattr(settings, "ASR_MIN_SILENCE_MS", 300))
+        ffmpeg_bin = get_ffmpeg_binary()
+
+        slice_info = self.plan_vad_chunks(
+            audio_data=audio_data,
+            sr=sr,
+            total_duration=total_duration,
+            target_chunk_len=chunk_len,
+            overlap=overlap,
+            min_silence_sec=min_silence_ms / 1000.0,
+        )
+        logger.info(f"Starting ASR on {audio_path.name} (Duration: {total_duration}s, {len(slice_info)} chunks)")
 
         # Check worker configuration scaled to GPU VRAM and CPU cores
         from ...services.hardware import get_hardware_profile
@@ -369,36 +496,30 @@ class BaseASREngine(BaseModelEngine):
                     if not words:
                         continue
 
-                    word_dur = dur_sec / len(words)
+                    # Deduplicate seam words with previous chunks using smart suffix-prefix match
+                    words_to_add = words
+                    if idx > 0 and all_words:
+                        tail_words = [w["word"] for w in all_words[-15:]]
+                        head_words = words[:15]
+                        overlap_k = self._find_word_overlap(tail_words, head_words)
+                        if overlap_k > 0:
+                            logger.info(f"Deduplicated {overlap_k} boundary words between chunks: {' '.join(words[:overlap_k])}")
+                            words_to_add = words[overlap_k:]
+
+                    if not words_to_add:
+                        continue
+
+                    word_dur = dur_sec / max(1, len(words))
+                    offset_idx = len(words) - len(words_to_add)
                     chunk_words = []
-                    for w_idx, word in enumerate(words):
-                        w_start = round(start_sec + w_idx * word_dur, 2)
-                        w_end = round(start_sec + (w_idx + 1) * word_dur, 2)
+                    for w_idx, word in enumerate(words_to_add):
+                        w_start = round(start_sec + (offset_idx + w_idx) * word_dur, 2)
+                        w_end = round(start_sec + (offset_idx + w_idx + 1) * word_dur, 2)
                         chunk_words.append({
                             "word": word,
                             "start": w_start,
                             "end": w_end,
                         })
-
-                    # Deduplicate overlap region
-                    if idx > 0 and all_words:
-                        overlap_boundary = start_sec + overlap
-                        new_start_idx = 0
-                        for c_idx, cw in enumerate(chunk_words):
-                            if cw["start"] >= overlap_boundary - 0.2:
-                                new_start_idx = c_idx
-                                break
-                        chunk_words = chunk_words[new_start_idx:]
-
-                        # Drop duplicate boundary words (e.g. repeated word across the chunk seam)
-                        while chunk_words and all_words:
-                            last_w = re.sub(r"[،,.\?!؟;:\"\']", "", all_words[-1]["word"]).strip()
-                            first_w = re.sub(r"[،,.\?!؟;:\"\']", "", chunk_words[0]["word"]).strip()
-                            if last_w and first_w and last_w == first_w and abs(chunk_words[0]["start"] - all_words[-1]["start"]) <= 1.5:
-                                logger.info(f"Deduplicated boundary word: '{chunk_words[0]['word']}' at {chunk_words[0]['start']}s")
-                                chunk_words = chunk_words[1:]
-                            else:
-                                break
 
                     if chunk_words:
                         text_part = " ".join(cw["word"] for cw in chunk_words)
@@ -481,8 +602,13 @@ class BaseASREngine(BaseModelEngine):
 
                 for i, w in enumerate(windows):
                     slice_wav = tmp_path / f"w_{i:05d}.wav"
-                    start = max(0.0, w["start"] - 0.20)
-                    dur = (w["end"] - w["start"]) + 0.40
+                    # Safe bounded padding that prevents bleeding into adjacent speaker turns
+                    prev_end = windows[i - 1]["end"] if i > 0 else 0.0
+                    next_start = windows[i + 1]["start"] if i + 1 < len(windows) else w["end"] + 10.0
+                    pad_left = min(0.06, max(0.0, w["start"] - prev_end))
+                    pad_right = min(0.06, max(0.0, next_start - w["end"]))
+                    start = max(0.0, w["start"] - pad_left)
+                    dur = (w["end"] - w["start"]) + pad_left + pad_right
                     slice_durations.append(dur)
 
                     slice_created = False
