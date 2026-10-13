@@ -35,7 +35,8 @@ def clean_and_guard_asr_text(text: str, dur_sec: Optional[float] = None) -> str:
     Sanitize raw ASR text output:
     1. Strip internal special tokens and format tags.
     2. Normalize bracketed annotations ([موسيقى], [ضحك]).
-    3. Correct Egyptian dialect hallucinated tokens to Levantine/Syrian equivalents (بتاع/بتوع -> تبع).
+    3. (REMOVED in frozen_v1 de-overfit: no dialect/proper-noun rewriting.
+       Verbatim-but-wrong > silent correction.)
     4. Remove known phantom hallucination phrases.
     5. Collapse repetitive token loops (phrase-level deduplication).
     6. Perform word-rate anomaly check (words vs duration).
@@ -56,43 +57,13 @@ def clean_and_guard_asr_text(text: str, dur_sec: Optional[float] = None) -> str:
     # Collapse character repetitions (e.g. elongation 'اااااا...' or laughter 'هههههه...')
     text = re.sub(r"(.)\1{3,}", r"\1\1", text)
 
-    # 2. Normalize bracketed words / artifacts
+    # 2. Generic artifact normalization only (frozen_v1 de-overfit:
+    # file-specific dish / proper-noun / dialect maps REMOVED.
+    # No يبرا->اليبرق, no بتاع->تبع, no باسم->قاسم.)
     replacements = {
         r"\[podcasts?\]": "بودكاست",
         r"\[benchmarks?\]": "بنشمارك",
         r"جهد تهني": "جهد ذهني",
-        # Dialect normalizations: replace Egyptian hallucinations with Syrian/Levantine spoken forms
-        r"\bبتاعة\b": "تبعة",
-        r"\bبتاعتنا\b": "تبعتنا",
-        r"\bبتوعنا\b": "تبعنا",
-        r"\bبتاعته\b": "تبعته",
-        r"\bبتاعه\b": "تبعه",
-        r"\bبتوعهم\b": "تبعهم",
-        r"\bبتاعتهم\b": "تبعتهم",
-        r"\bبتاعتك\b": "تبعتك",
-        r"\bبتوعك\b": "تبعك",
-        r"\bبتوع\b": "تبع",
-        r"\bبتاع\b": "تبع",
-        # Syrian dish canonical orthography: Cohere often emits phonetic
-        # glottal-stop forms (يبرا/يبره) for قاف words pronounced as hamza
-        # in Damascus dialect; Audar emits الابرة (needle). Map food-context
-        # variants to canonical ق spelling used in references.
-        r"\bاليبرا\b": "اليبرق",
-        r"\bيبرا\b": "يبرق",
-        r"\bاليبره\b": "اليبرق",
-        r"\bيبره\b": "يبرق",
-        r"يحب الابرة\b": "يحب اليبرق",
-        r"والله الابرة\b": "والله اليبرق",
-        r"الابرة ورق": "اليبرق ورق",
-        r"الابرة وارجعي": "اليبرق ولا يلنجي",
-        r"ورق عنا\b": "ورق عنب",
-        r"ورق عناب\b": "ورق عنب",
-        # Proper-noun fixes observed on this corpus: Whisper renders لقاسم
-        # as باسم/باسمين, يا قاسم as يا كاسي. Narrowly scoped to question
-        # context so a real person named باسم elsewhere is untouched.
-        r"سؤال باسمين\b": "سؤال بس لقاسم",
-        r"سؤال باسم\b": "سؤال بس لقاسم",
-        r"\bيا كاسي\b": "يا قاسم",
     }
     for pat, rep in replacements.items():
         text = re.sub(pat, rep, text, flags=re.IGNORECASE)

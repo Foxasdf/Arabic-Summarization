@@ -117,9 +117,8 @@ class WhisperASREngine(BaseASREngine):
     def _transcribe_slice_internal(self, slice_wav_path: Path, dur_sec: float) -> str:
         """Transcribe a slice using faster-whisper with Arabic language forcing.
 
-        Uses dialect-tuned decoding: greedy temp-0 with temperature fallback,
-        strict compression gate, dialectal initial prompt + hotwords for proper
-        nouns (قاسم/يبرق/كبة), and no condition-on-previous to stop cascade.
+        frozen_v1 de-overfit: generic decoding (temp-0, no condition-on-prev),
+        generic prompt from settings (no file-specific names/dishes).
         Returns plain text (word timings handled uniformly by BaseASREngine).
         """
         if not self.is_loaded():

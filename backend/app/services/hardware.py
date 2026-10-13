@@ -125,7 +125,15 @@ class HardwareProfile:
         """
         Dynamic batch sizes for Pyannote 3.1 diarization.
         Larger batch sizes saturate NVIDIA CUDA / Tensor Cores on long recordings,
-        reducing Python kernel launch overhead by 50-75% without altering turn boundaries.
+        reducing Python kernel launch overhead by 50-75%.
+
+        NOTE: thresholds here deliberately key off vram_total_gb (a fixed property
+        of the machine) and NOT vram_free_gb (a live measurement). Keying off free
+        VRAM made the batch size depend on whatever else was resident on the GPU at
+        the moment of the request, and combined with TF32 matmuls that flipped
+        borderline speaker embeddings — the same file intermittently diarized to a
+        different speaker count across processes. Batch size now stays stable for a
+        given machine, so repeated runs on identical audio are reproducible.
         """
         batch_override = getattr(settings, "DIARIZATION_BATCH_SIZE", 0)
         if batch_override > 0:
@@ -134,11 +142,11 @@ class HardwareProfile:
         elif not self.use_gpu:
             seg_batch = 32
             emb_batch = 32
-        elif self.vram_total_gb >= 15.0 and self.vram_free_gb >= 8.0:
+        elif self.vram_total_gb >= 15.0:
             # 24GB GPUs (RTX 3090, 4090, A10G)
             seg_batch = 256
             emb_batch = 128
-        elif self.vram_total_gb >= 10.0 and self.vram_free_gb >= 4.0:
+        elif self.vram_total_gb >= 10.0:
             # 11GB - 12GB GPUs (RTX 2080 Ti, RTX 3060 12GB, RTX 3080)
             seg_batch = 192
             emb_batch = 96

@@ -79,9 +79,9 @@ class BaseASREngine(BaseModelEngine):
     @staticmethod
     def plan_windows(
         turns: List[Dict[str, Any]],
-        max_len: float = 15.0,
+        max_len: float = 25.0,
         min_len: float = 0.25,
-        max_same_speaker_gap: float = 2.5,
+        max_same_speaker_gap: float = 1.2,
     ) -> List[Dict[str, Any]]:
         """
         Convert speaker diarization turns into optimal ASR windows:
@@ -602,15 +602,11 @@ class BaseASREngine(BaseModelEngine):
                 slice_paths: List[Optional[Path]] = []
                 slice_durations: List[float] = []
 
+                pad_sec = float(getattr(settings, "TURN_PAD_MS", 100)) / 1000.0
                 for i, w in enumerate(windows):
                     slice_wav = tmp_path / f"w_{i:05d}.wav"
-                    # Safe bounded padding that prevents bleeding into adjacent speaker turns
-                    prev_end = windows[i - 1]["end"] if i > 0 else 0.0
-                    next_start = windows[i + 1]["start"] if i + 1 < len(windows) else w["end"] + 10.0
-                    pad_left = min(0.06, max(0.0, w["start"] - prev_end))
-                    pad_right = min(0.06, max(0.0, next_start - w["end"]))
-                    start = max(0.0, w["start"] - pad_left)
-                    dur = (w["end"] - w["start"]) + pad_left + pad_right
+                    start = max(0.0, float(w["start"]) - pad_sec)
+                    dur = (float(w["end"]) - float(w["start"])) + (pad_sec * 2.0)
                     slice_durations.append(dur)
 
                     slice_created = False
@@ -701,13 +697,15 @@ class BaseASREngine(BaseModelEngine):
                             pass
 
                 # Assemble and merge consecutive same-speaker windows
+                max_utterance_dur = 15.0
                 for i, w in enumerate(windows):
                     text = results[i].strip()
                     if text:
                         if (
                             segments
                             and segments[-1]["speaker"] == w["speaker"]
-                            and w["start"] - segments[-1]["end"] < 2.5
+                            and (w["start"] - segments[-1]["end"]) <= 1.2
+                            and (w["end"] - segments[-1]["start"]) <= max_utterance_dur
                         ):
                             segments[-1]["text"] += " " + text
                             segments[-1]["end"] = w["end"]

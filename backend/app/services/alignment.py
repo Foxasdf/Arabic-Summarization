@@ -13,94 +13,52 @@ from typing import List, Dict, Any, Union, Optional
 logger = logging.getLogger(__name__)
 
 
-def clean_diarization_turns(turns: List[Dict], min_dur: float = 0.25) -> List[Dict]:
-    """Clean and structure raw diarization intervals into robust conversational floor turns."""
+def clean_diarization_turns(
+    turns: List[Dict],
+    min_dur: float = 0.15,
+    merge_gap: float = 0.5,
+    punch_min: float = 0.75,
+) -> List[Dict]:
+    """Clean raw diarization intervals into conversational speaker turns.
+    Preserves all authentic speech intervals without destructive hole-punching or truncating.
+
+    1. Filters micro-noise clicks (< min_dur).
+    2. Merges same-speaker contiguous or near-adjacent intervals (gap <= merge_gap).
+    3. Preserves concurrent speech tracks so each speaker's voice is retained.
+    """
     if not turns:
         return []
 
-    # 1. Filter micro-noise
+    # 1. Filter micro-noise clicks (< min_dur)
     valid = [
-        {"speaker": str(t["speaker"]), "start": float(t["start"]), "end": float(t["end"])}
+        {"speaker": str(t["speaker"]), "start": round(float(t["start"]), 2), "end": round(float(t["end"]), 2)}
         for t in turns
         if (float(t["end"]) - float(t["start"])) >= min_dur
     ]
     if not valid:
         return []
-    valid.sort(key=lambda t: (t["start"], -(t["end"] - t["start"])))
 
-    # 2. Merge same-speaker overlapping or near-adjacent intervals (gap <= 1.25s without intervening speaker)
+    # 2. Chronological same-speaker merging: ONLY merge strictly consecutive turns of same speaker
     valid.sort(key=lambda t: (t["start"], t["end"]))
-    all_clean: List[Dict] = []
+    merged_turns: List[Dict] = []
     for t in valid:
-        if not all_clean:
-            all_clean.append(dict(t))
+        if not merged_turns:
+            merged_turns.append(dict(t))
             continue
-        prev = all_clean[-1]
-        gap = float(t["start"]) - float(prev["end"])
-        if prev["speaker"] == t["speaker"] and gap <= 1.25:
-            prev["end"] = max(float(prev["end"]), float(t["end"]))
+        prev = merged_turns[-1]
+        if t["speaker"] == prev["speaker"] and 0.0 <= (t["start"] - prev["end"]) <= merge_gap:
+            prev["end"] = max(prev["end"], t["end"])
         else:
-            all_clean.append(dict(t))
+            merged_turns.append(dict(t))
 
-    # 3. Handle interjections and floor handovers:
-    interjections = [t for t in all_clean if (t["end"] - t["start"]) <= 2.0]
-    long_turns = [t for t in all_clean if (t["end"] - t["start"]) > 2.0]
-
-    current_turns = list(long_turns)
-    for inj in interjections:
-        new_turns: List[Dict] = []
-        punched = False
-        inj_dur = inj["end"] - inj["start"]
-        for lt in current_turns:
-            if lt["speaker"] != inj["speaker"] and lt["start"] <= inj["start"] and inj["end"] <= lt["end"]:
-                if inj_dur >= 0.5:
-                    if inj["start"] - lt["start"] >= 0.35:
-                        new_turns.append({"speaker": lt["speaker"], "start": lt["start"], "end": inj["start"]})
-                    new_turns.append(dict(inj))
-                    if lt["end"] - inj["end"] >= 0.35:
-                        new_turns.append({"speaker": lt["speaker"], "start": inj["end"], "end": lt["end"]})
-                    punched = True
-                else:
-                    new_turns.append(lt)
-                    punched = True
-            else:
-                new_turns.append(lt)
-        if not punched:
-            new_turns.append(dict(inj))
-        current_turns = new_turns
-
-    # 4. Sort and resolve boundary overlaps at midpoint
-    current_turns.sort(key=lambda t: (t["start"], t["end"]))
-    resolved: List[Dict] = []
-    for t in current_turns:
-        if not resolved:
-            resolved.append(dict(t))
-            continue
-        prev = resolved[-1]
-        if t["start"] < prev["end"]:
-            if t["speaker"] == prev["speaker"]:
-                prev["end"] = max(prev["end"], t["end"])
-                continue
-            ov = prev["end"] - t["start"]
-            if ov > 0:
-                mid = round((t["start"] + prev["end"]) / 2.0, 2)
-                if mid > prev["start"] + 0.1:
-                    prev["end"] = mid
-                if mid < t["end"] - 0.1:
-                    t["start"] = mid
-        if prev["end"] <= prev["start"] + 0.1:
-            resolved.pop()
-        if (t["end"] - t["start"]) >= 0.2:
-            resolved.append(dict(t))
-
-    # 5. Round timestamps and ensure speaker is set
-    for t in resolved:
+    # 3. Ensure speaker name and valid rounded timestamps
+    for t in merged_turns:
         if not t.get("speaker"):
             t["speaker"] = "SPEAKER_00"
         t["start"] = round(float(t["start"]), 2)
         t["end"] = round(float(t["end"]), 2)
 
-    return resolved
+    return merged_turns
 
 
 def assign_words_to_speakers(
@@ -123,23 +81,31 @@ def assign_words_to_speakers(
 
         best_spk = None
         max_overlap = 0.0
+        best_dur = float("inf")
 
         for t in turns:
             t_st = float(t.get("start", 0.0))
             t_en = float(t.get("end", 0.0))
+            t_dur = max(0.01, t_en - t_st)
             ov = max(0.0, min(en, t_en) - max(st, t_st))
-            if ov > max_overlap:
+            if ov > max_overlap + 1e-4:
                 max_overlap = ov
+                best_dur = t_dur
+                best_spk = t.get("speaker")
+            elif ov > 0 and abs(ov - max_overlap) <= 1e-4 and t_dur < best_dur:
+                best_dur = t_dur
                 best_spk = t.get("speaker")
 
         if best_spk is None or (max_overlap / w_dur) < 0.2:
-            # Check midpoint containment
+            # Check midpoint containment, preferring shorter/more specific turn
+            best_dur = float("inf")
             for t in turns:
                 t_st = float(t.get("start", 0.0))
                 t_en = float(t.get("end", 0.0))
-                if t_st <= mid <= t_en:
+                t_dur = max(0.01, t_en - t_st)
+                if t_st <= mid <= t_en and t_dur < best_dur:
+                    best_dur = t_dur
                     best_spk = t.get("speaker")
-                    break
 
         if best_spk is None:
             # Find nearest turn boundary within gap_threshold

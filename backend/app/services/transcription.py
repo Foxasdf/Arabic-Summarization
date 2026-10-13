@@ -69,27 +69,28 @@ def transcribe_with_speakers(
         try:
             engine.load()
             if turns:
-                return engine.transcribe_turns(
+                turns_res = engine.transcribe_turns(
                     audio_path,
                     turns,
                     on_progress=on_progress,
                     progress_range=progress_range,
                 )
-            else:
-                asr_res = engine.transcribe(
-                    audio_path,
-                    on_progress=on_progress,
-                    progress_range=progress_range,
-                )
-                text = asr_res.get("text", "").strip() if asr_res else ""
-                from .audio_processor import get_audio_duration
-                dur = get_audio_duration(audio_path)
-                return [{
-                    "speaker": "SPEAKER_00",
-                    "text": text,
-                    "start": 0.0,
-                    "end": round(dur, 2),
-                }] if text else []
+                if turns_res:
+                    return turns_res
+            asr_res = engine.transcribe(
+                audio_path,
+                on_progress=on_progress,
+                progress_range=progress_range,
+            )
+            text = asr_res.get("text", "").strip() if asr_res else ""
+            from .audio_processor import get_audio_duration
+            dur = get_audio_duration(audio_path)
+            return [{
+                "speaker": "SPEAKER_00",
+                "text": text,
+                "start": 0.0,
+                "end": round(dur, 2),
+            }] if text else []
         finally:
             engine.unload()
 
@@ -129,7 +130,8 @@ def transcribe_with_speakers(
     # two models disagree on dialectal wording.
     from .alignment import align_timestamps
 
-    words = asr_res.get("words") or []
+    has_native_words = getattr(engine, "has_word_timestamps", False)
+    words = asr_res.get("words") or [] if has_native_words else []
     # Validate engine words: must cover full text and have sane durations
     if words:
         n_txt = len(text.split())

@@ -17,15 +17,19 @@ from .audio_processor import get_audio_duration
 logger = logging.getLogger(__name__)
 
 # Ensure CUDA runtime DLLs (cublas64_12.dll) from torch/lib are reachable on Windows
-_torch_lib = Path(__file__).resolve().parent.parent.parent / ".venv" / "Lib" / "site-packages" / "torch" / "lib"
-if _torch_lib.exists():
-    if hasattr(os, "add_dll_directory"):
-        try:
-            os.add_dll_directory(str(_torch_lib))
-        except Exception:
-            pass
-    if str(_torch_lib) not in os.environ.get("PATH", ""):
-        os.environ["PATH"] = str(_torch_lib) + ";" + os.environ.get("PATH", "")
+for _base in [
+    Path(__file__).resolve().parent.parent.parent / ".venv" / "Lib" / "site-packages" / "torch" / "lib",
+    Path(sys.prefix) / "Lib" / "site-packages" / "torch" / "lib",
+    Path(__file__).resolve().parent.parent.parent / ".venv" / "Lib" / "site-packages" / "llama_cpp" / "lib",
+]:
+    if _base.exists():
+        if hasattr(os, "add_dll_directory"):
+            try:
+                os.add_dll_directory(str(_base))
+            except Exception:
+                pass
+        if str(_base) not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = str(_base) + ";" + os.environ.get("PATH", "")
 
 
 def _normalize_token(w: str) -> str:
@@ -209,11 +213,35 @@ def align_words_to_audio(
                     import ctranslate2
                     if ctranslate2.get_cuda_device_count() == 0:
                         continue
-                sr, raw = scipy.io.wavfile.read(str(audio_path))
-                if raw.ndim > 1:
-                    raw = raw.mean(axis=1)
 
-                audio_f32 = (raw.astype(np.float32) / 32768.0).copy()
+                audio_f32 = None
+                sr = 16000
+                try:
+                    sr_read, raw = scipy.io.wavfile.read(str(audio_path))
+                    if raw.ndim > 1:
+                        raw = raw.mean(axis=1)
+                    if sr_read == 16000:
+                        audio_f32 = (raw.astype(np.float32) / 32768.0).copy()
+                except Exception:
+                    pass
+
+                if audio_f32 is None:
+                    from .audio_processor import get_ffmpeg_binary
+                    import subprocess, tempfile
+                    ffmpeg_bin = get_ffmpeg_binary()
+                    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_f:
+                        tmp_wav_path = Path(tmp_f.name)
+                    cmd = [
+                        ffmpeg_bin, "-y", "-loglevel", "error",
+                        "-i", str(audio_path),
+                        "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
+                        str(tmp_wav_path)
+                    ]
+                    subprocess.run(cmd, check=True)
+                    _, raw = scipy.io.wavfile.read(str(tmp_wav_path))
+                    tmp_wav_path.unlink(missing_ok=True)
+                    audio_f32 = (raw.astype(np.float32) / 32768.0).copy()
+
                 if max_duration_seconds:
                     max_samples = int(max_duration_seconds * sr)
                     audio_f32 = audio_f32[:max_samples]
@@ -221,7 +249,7 @@ def align_words_to_audio(
                 logger.info(f"Running acoustic word timestamp extraction via {whisper_dir.name} on {device.upper()}...")
                 model = faster_whisper.WhisperModel(str(whisper_dir), device=device, compute_type=compute_type)
                 segs, _ = model.transcribe(audio_f32, language="ar", word_timestamps=True)
-                ref_words = [w for s in segs for w in s.words]
+                ref_words = [w for s in segs for w in (s.words or [])]
                 if ref_words:
                     break
             except Exception as e:
@@ -232,20 +260,19 @@ def align_words_to_audio(
             if ref_words:
                 aligned_pairs = _align_tokens_dp(words, ref_words)
                 if len(aligned_pairs) == len(words):
-                    # Validate alignment quality: exact-match rate and sane durations
-                    t_norm = [_normalize_token(w) for w in words]
-                    r_norm = [_normalize_token(getattr(w, "word", str(w))) for w in ref_words]
-                    # Estimate match rate via DP cost is implicit; check durations instead
-                    durs = [max(0.0, p[1] - p[0]) for p in aligned_pairs]
+                    clamped_pairs = []
+                    for st, en in aligned_pairs:
+                        st = max(0.0, float(st))
+                        en = max(st + 0.05, float(en))
+                        if en - st > 1.5:
+                            en = st + 1.5
+                        clamped_pairs.append((round(st, 2), round(en, 2)))
+
+                    durs = [p[1] - p[0] for p in clamped_pairs]
                     avg_dur = sum(durs) / max(1, len(durs))
-                    max_dur = max(durs) if durs else 0.0
-                    exact = sum(1 for a, b in zip(
-                        [_normalize_token(w) for w in words],
-                        [_normalize_token(getattr(w, "word", str(w))) for w in ref_words[:len(words)]]) if a == b)
-                    # Implausible if avg word >0.9s or any word >2.5s (uniform fallback is ~0.35s)
-                    if avg_dur > 0.9 or max_dur > 2.5:
+                    if avg_dur > 1.2 or avg_dur < 0.05:
                         logger.warning(
-                            f"Acoustic alignment implausible (avg_dur={avg_dur:.2f}s max={max_dur:.2f}s); "
+                            f"Acoustic alignment implausible (avg_dur={avg_dur:.2f}s); "
                             "using relative fallback to preserve speaker boundaries."
                         )
                     else:
@@ -253,10 +280,10 @@ def align_words_to_audio(
                         return [
                             {
                                 "word": words[idx],
-                                "start": pair[0],
-                                "end": pair[1],
+                                "start": clamped_pairs[idx][0],
+                                "end": clamped_pairs[idx][1],
                             }
-                            for idx, pair in enumerate(aligned_pairs)
+                            for idx in range(len(words))
                         ]
         except Exception as e:
             logger.warning(f"Acoustic forced alignment encountered an error ({e}); engaging relative fallback.")
