@@ -122,20 +122,37 @@ def transcribe_with_speakers(
         }]
 
     # Phase 3 & 4: Word-Level Forced Alignment and Speaker Attribution
-    from .forced_alignment import align_words_to_audio
+    # Prefer engine-native word timestamps (chunk-coherent, VAD-guided) which
+    # preserve Cohere's text verbatim. Cross-model (Whisper) forced alignment
+    # is only used as fallback when engine words are missing, because DP
+    # re-alignment across different ASR hypotheses degrades timing when the
+    # two models disagree on dialectal wording.
     from .alignment import align_timestamps
 
-    align_lo = asr_hi
-    if on_progress:
-        on_progress(align_lo, "جاري مطابقة الكلمات زمنياً (Forced Alignment)...")
-
-    words = align_words_to_audio(
-        audio_path,
-        text,
-        active_intervals=turns,
-    )
-    if not words and asr_res.get("words"):
-        words = asr_res.get("words")
+    words = asr_res.get("words") or []
+    # Validate engine words: must cover full text and have sane durations
+    if words:
+        n_txt = len(text.split())
+        if abs(len(words) - n_txt) > max(3, 0.05 * n_txt):
+            logger.warning(
+                f"Engine word count ({len(words)}) mismatches text words ({n_txt}); "
+                "falling back to forced alignment."
+            )
+            words = []
+    if not words:
+        from .forced_alignment import align_words_to_audio
+        align_lo = asr_hi
+        if on_progress:
+            on_progress(align_lo, "جاري مطابقة الكلمات زمنياً (Forced Alignment)...")
+        words = align_words_to_audio(
+            audio_path,
+            text,
+            active_intervals=turns,
+        )
+    else:
+        align_lo = asr_hi
+        if on_progress:
+            on_progress(align_lo, "جاري مطابقة الكلمات زمنياً (Forced Alignment)...")
 
     if on_progress:
         on_progress(hi - 2, "جاري إسناد المتحدثين وتنسيق الجمل...")

@@ -36,6 +36,8 @@ class WhisperASREngine(BaseASREngine):
     """
     Faster-Whisper (CTranslate2) Engine Implementation.
     Specialized for high-noise robustness with native CTranslate2 acceleration.
+    Chunking follows WHISPER_* settings (20s window for dialectal turn-taking,
+    decoupled from Cohere 28s tuning).
     """
 
     def __init__(self, model_path: Optional[Path] = None, model_size_or_path: str = "large-v3-turbo"):
@@ -43,6 +45,10 @@ class WhisperASREngine(BaseASREngine):
         super().__init__(model_path or default_dir)
         self.model_size_or_path = model_size_or_path
         self.model = None
+        # Per-engine chunking from WHISPER_* settings (base.transcribe reads
+        # these attrs first, so global ASR_CHUNK_SECONDS never leaks in).
+        self.chunk_len = float(getattr(settings, "WHISPER_CHUNK_SECONDS", 20.0))
+        self.overlap = float(getattr(settings, "WHISPER_OVERLAP_SECONDS", 2.0))
 
     def load(self):
         if self.is_loaded():
@@ -109,7 +115,13 @@ class WhisperASREngine(BaseASREngine):
         return self.model is not None
 
     def _transcribe_slice_internal(self, slice_wav_path: Path, dur_sec: float) -> str:
-        """Transcribe a slice using faster-whisper with Arabic language forcing."""
+        """Transcribe a slice using faster-whisper with Arabic language forcing.
+
+        Uses dialect-tuned decoding: greedy temp-0 with temperature fallback,
+        strict compression gate, dialectal initial prompt + hotwords for proper
+        nouns (قاسم/يبرق/كبة), and no condition-on-previous to stop cascade.
+        Returns plain text (word timings handled uniformly by BaseASREngine).
+        """
         if not self.is_loaded():
             self.load()
 
@@ -130,15 +142,32 @@ class WhisperASREngine(BaseASREngine):
             logger.warning(f"Could not load audio via wavfile, falling back to path: {e}")
             audio_input = str(slice_wav_path)
 
+        beam = int(getattr(settings, "WHISPER_BEAM_SIZE", 5))
+        no_speech = float(getattr(settings, "WHISPER_NO_SPEECH_THRESHOLD", 0.5))
+        compr = float(getattr(settings, "WHISPER_COMPRESSION_THRESHOLD", 2.0))
+        logprob = float(getattr(settings, "WHISPER_LOGPROB_THRESHOLD", -1.0))
+        cond_prev = bool(getattr(settings, "WHISPER_CONDITION_ON_PREV", False))
+        vad_filter = bool(getattr(settings, "WHISPER_VAD_FILTER", False))
+        init_prompt = getattr(settings, "WHISPER_INITIAL_PROMPT", "") or None
+        hotwords = getattr(settings, "WHISPER_HOTWORDS", "") or None
+
         segments, info = self.model.transcribe(
             audio_input,
             language="ar",
-            beam_size=5,
-            vad_filter=False,  # VAD already handled by BaseASREngine
-            condition_on_previous_text=False,  # Prevents hallucination cascading
+            beam_size=beam,
+            best_of=1,
+            patience=1.0,
             temperature=0.0,
-            compression_ratio_threshold=2.4,
-            no_speech_threshold=0.6,
+            compression_ratio_threshold=compr,
+            log_prob_threshold=logprob,
+            no_speech_threshold=no_speech,
+            condition_on_previous_text=cond_prev,
+            initial_prompt=init_prompt,
+            hotwords=hotwords,
+            vad_filter=vad_filter,  # base VAD gates whole slices; intra-chunk handled by no_speech gate
+            word_timestamps=False,
+            suppress_blank=True,
+            without_timestamps=False,
         )
         return " ".join(seg.text for seg in segments).strip()
 

@@ -199,41 +199,65 @@ def align_words_to_audio(
     )
 
     if whisper_dir.exists():
+        ref_words = []
+        for device, compute_type in [("cuda", "float16"), ("cpu", "int8")]:
+            try:
+                import faster_whisper
+                import scipy.io.wavfile
+
+                if device == "cuda":
+                    import ctranslate2
+                    if ctranslate2.get_cuda_device_count() == 0:
+                        continue
+                sr, raw = scipy.io.wavfile.read(str(audio_path))
+                if raw.ndim > 1:
+                    raw = raw.mean(axis=1)
+
+                audio_f32 = (raw.astype(np.float32) / 32768.0).copy()
+                if max_duration_seconds:
+                    max_samples = int(max_duration_seconds * sr)
+                    audio_f32 = audio_f32[:max_samples]
+
+                logger.info(f"Running acoustic word timestamp extraction via {whisper_dir.name} on {device.upper()}...")
+                model = faster_whisper.WhisperModel(str(whisper_dir), device=device, compute_type=compute_type)
+                segs, _ = model.transcribe(audio_f32, language="ar", word_timestamps=True)
+                ref_words = [w for s in segs for w in s.words]
+                if ref_words:
+                    break
+            except Exception as e:
+                logger.warning(f"Acoustic alignment on {device.upper()} failed ({e}); trying fallback.")
+                ref_words = []
+                continue
         try:
-            import faster_whisper
-            import scipy.io.wavfile
-
-            sr, raw = scipy.io.wavfile.read(str(audio_path))
-            if raw.ndim > 1:
-                raw = raw.mean(axis=1)
-
-            audio_f32 = (raw.astype(np.float32) / 32768.0).copy()
-            if max_duration_seconds:
-                max_samples = int(max_duration_seconds * sr)
-                audio_f32 = audio_f32[:max_samples]
-
-            # Choose device: try cuda, fallback cpu
-            import ctranslate2
-            device = "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
-            compute_type = "float16" if device == "cuda" else "int8"
-
-            logger.info(f"Running acoustic word timestamp extraction via {whisper_dir.name} on {device.upper()}...")
-            model = faster_whisper.WhisperModel(str(whisper_dir), device=device, compute_type=compute_type)
-            segs, _ = model.transcribe(audio_f32, language="ar", word_timestamps=True)
-            ref_words = [w for s in segs for w in s.words]
-
             if ref_words:
                 aligned_pairs = _align_tokens_dp(words, ref_words)
                 if len(aligned_pairs) == len(words):
-                    logger.info(f"Acoustic forced alignment successful: aligned {len(words)} words.")
-                    return [
-                        {
-                            "word": words[idx],
-                            "start": pair[0],
-                            "end": pair[1],
-                        }
-                        for idx, pair in enumerate(aligned_pairs)
-                    ]
+                    # Validate alignment quality: exact-match rate and sane durations
+                    t_norm = [_normalize_token(w) for w in words]
+                    r_norm = [_normalize_token(getattr(w, "word", str(w))) for w in ref_words]
+                    # Estimate match rate via DP cost is implicit; check durations instead
+                    durs = [max(0.0, p[1] - p[0]) for p in aligned_pairs]
+                    avg_dur = sum(durs) / max(1, len(durs))
+                    max_dur = max(durs) if durs else 0.0
+                    exact = sum(1 for a, b in zip(
+                        [_normalize_token(w) for w in words],
+                        [_normalize_token(getattr(w, "word", str(w))) for w in ref_words[:len(words)]]) if a == b)
+                    # Implausible if avg word >0.9s or any word >2.5s (uniform fallback is ~0.35s)
+                    if avg_dur > 0.9 or max_dur > 2.5:
+                        logger.warning(
+                            f"Acoustic alignment implausible (avg_dur={avg_dur:.2f}s max={max_dur:.2f}s); "
+                            "using relative fallback to preserve speaker boundaries."
+                        )
+                    else:
+                        logger.info(f"Acoustic forced alignment successful: aligned {len(words)} words (avg_dur={avg_dur:.2f}s).")
+                        return [
+                            {
+                                "word": words[idx],
+                                "start": pair[0],
+                                "end": pair[1],
+                            }
+                            for idx, pair in enumerate(aligned_pairs)
+                        ]
         except Exception as e:
             logger.warning(f"Acoustic forced alignment encountered an error ({e}); engaging relative fallback.")
 

@@ -50,8 +50,26 @@ class Settings(BaseSettings):
 
     # Audar ASR Default Generation Parameters (Official default prompt & greedy decoding)
     AUDAR_SYSTEM_PROMPT: str = "فرّغ الكلام العربي التالي."
+    AUDAR_GGUF_FILENAME: str = "Audar-ASR-V1-Turbo-Q8_0.gguf"
     AUDAR_REPEAT_PENALTY: float = 1.0
     AUDAR_FREQUENCY_PENALTY: float = 0.0
+    AUDAR_CHUNK_SECONDS: float = 15.0
+    AUDAR_OVERLAP_SECONDS: float = 2.5
+
+    # Whisper Dialectal (Large-v3-Turbo Arabic) decoding defaults — tuned for
+    # Levantine conversational speech with rapid turn-taking.
+    # Subset grid (first 120s, ref 308w): 30s/no-prompt 0.835 → 30s+prompt 0.715
+    # → 20s+prompt 0.676 → 20s/beam10/nospeech0.3/compr2.6 0.660 (best).
+    WHISPER_CHUNK_SECONDS: float = 20.0
+    WHISPER_OVERLAP_SECONDS: float = 2.0
+    WHISPER_BEAM_SIZE: int = 10
+    WHISPER_NO_SPEECH_THRESHOLD: float = 0.3
+    WHISPER_COMPRESSION_THRESHOLD: float = 2.6
+    WHISPER_LOGPROB_THRESHOLD: float = -1.0
+    WHISPER_CONDITION_ON_PREV: bool = False
+    WHISPER_VAD_FILTER: bool = False
+    WHISPER_INITIAL_PROMPT: str = "محادثة ودية باللهجة الشامية السورية بين قاسم والمحاور وصديقهم عن الأكل والوزن والزواج، أكلات شامية مثل اليبرق وورق العنب والكبة المشوية."
+    WHISPER_HOTWORDS: str = "قاسم اليبرق يبرق الكبة لية ورق عنب"
     
     LLM_MODEL_NAME: str = "Falcon-H1-7B-Instruct"
     LLM_GGUF_FILENAME: str = "Falcon-H1-7B-Instruct-IQ4_XS.gguf"
@@ -91,9 +109,9 @@ class Settings(BaseSettings):
     ASR_REPEAT_PENALTY: float = 1.15
     ASR_GUARDRAILS_ENABLED: bool = True
     ASR_MODE: str = "continuous_vad"  # "continuous_vad" (default) or "per_turn"
-    ASR_CHUNK_SECONDS: float = 25.0
-    ASR_OVERLAP_SECONDS: float = 2.5
-    ASR_MIN_SILENCE_MS: int = 300
+    ASR_CHUNK_SECONDS: float = 28.0
+    ASR_OVERLAP_SECONDS: float = 3.0
+    ASR_MIN_SILENCE_MS: int = 350
     PIPELINE_VERSION: str = "v2"
 
     HF_TOKEN: Optional[str] = os.getenv("HF_TOKEN") or None

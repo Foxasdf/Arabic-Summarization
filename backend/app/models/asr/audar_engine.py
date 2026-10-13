@@ -21,16 +21,18 @@ class AudarASREngine(BaseASREngine):
     Official Prompt: "فرّغ الكلام العربي التالي."
     """
 
-    # Audar ASR runs on CUDA GPU via llama-cpp-python MTMD and scales across available VRAM
+    # Audar ASR runs on CUDA GPU via llama-cpp-python MTMD and scales across available VRAM.
+    # Chunking follows AUDAR_* settings (20s native window, decoupled from Cohere 28s).
     allow_secondary_workers: bool = True
-    chunk_len: float = 15.0
-    overlap: float = 2.5
 
     def __init__(self, model_path: Path, mmproj_path: Optional[Path] = None):
         super().__init__(model_path)
         self.mmproj_path = Path(mmproj_path) if mmproj_path else self._find_mmproj_path()
         self.model = None
         self.handler = None
+        # Per-instance chunking from settings (base.transcribe reads these attrs first)
+        self.chunk_len = float(getattr(settings, "AUDAR_CHUNK_SECONDS", 20.0))
+        self.overlap = float(getattr(settings, "AUDAR_OVERLAP_SECONDS", 2.5))
 
     def _find_mmproj_path(self) -> Path:
         """Find the corresponding multimodal projector (mmproj) for Audar ASR."""

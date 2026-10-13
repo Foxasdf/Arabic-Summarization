@@ -52,11 +52,23 @@ def get_asr_engine(
             model_path=Path(model_identifier) if isinstance(model_identifier, Path) else None
         )
 
-    # 4. Default to Audar ASR engine
+    # 4. Audar ASR (explicit key) — must use its own GGUF, NOT ASR_GGUF_FILENAME
+    # (which now points to Cohere as the default ASR).
+    if "audar" in ident_str or "flash" in ident_str:
+        audar_path = settings.MODELS_DIR / getattr(
+            settings, "AUDAR_GGUF_FILENAME", "Audar-ASR-V1-Turbo-Q8_0.gguf"
+        )
+        if isinstance(model_identifier, Path) and model_identifier.exists():
+            audar_path = model_identifier
+        return AudarASREngine(model_path=audar_path, mmproj_path=mmproj_path)
+
+    # 5. Default to Audar ASR engine
     if isinstance(model_identifier, Path) and model_identifier.exists():
         model_path = model_identifier
     else:
-        model_path = settings.MODELS_DIR / settings.ASR_GGUF_FILENAME
+        model_path = settings.MODELS_DIR / getattr(
+            settings, "AUDAR_GGUF_FILENAME", "Audar-ASR-V1-Turbo-Q8_0.gguf"
+        )
 
     return AudarASREngine(model_path=model_path, mmproj_path=mmproj_path)
 

@@ -203,15 +203,17 @@ def smooth_speaker_assignments(
 
 def build_utterances_from_words(
     words: List[Dict[str, Any]],
-    max_pause_sec: float = 2.0,
-    max_words_per_utterance: int = 45,
+    max_pause_sec: float = 1.0,
+    max_words_per_utterance: int = 30,
 ) -> List[Dict[str, Any]]:
     """
     Build conversational utterances:
     Starts a new utterance when:
     (a) Speaker changes.
-    (b) Pause / silence > 2.0s between consecutive words.
-    (c) Maximum utterance length reached.
+    (b) Pause / silence > 1.0s between consecutive words (tuned to Levantine
+        turn-taking; 2.0s merged distinct conversational moves).
+    (c) Maximum utterance length reached (30 words keeps subtitles readable
+        and matches reference granularity ~8 words/segment).
     """
     if not words:
         return []

@@ -313,6 +313,8 @@ class BaseASREngine(BaseModelEngine):
             sr=sr,
             total_duration=total_duration,
             target_chunk_len=chunk_len,
+            min_chunk_len=max(8.0, round(chunk_len * 0.72, 1)),
+            max_chunk_len=min(30.0, round(chunk_len + 5.0, 1)),
             overlap=overlap,
             min_silence_sec=min_silence_ms / 1000.0,
         )
