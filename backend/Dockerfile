@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -14,14 +15,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 COPY wheels/ /tmp/wheels/
 
-# تثبيت الحزم مع دعم NVIDIA CUDA وتضمين مكتبات تشغيل CUDA 12 Runtime
-# يدعم استخدام حزم الـ Wheel المحلية من /tmp/wheels إذا تم تحميلها مسبقاً
-RUN pip install --no-cache-dir --default-timeout=1000 --retries 10 \
+# استخدام الكاش الدائم + التثبيت من /tmp/wheels أولاً دون إعادة التحميل
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --default-timeout=1000 --retries 10 \
     --find-links /tmp/wheels \
     -r requirements.txt \
     --extra-index-url https://download.pytorch.org/whl/cu124 \
     --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124 \
-    && pip install --no-cache-dir nvidia-cuda-runtime-cu12 nvidia-cublas-cu12
+    && pip install --default-timeout=1000 --retries 10 \
+    --find-links /tmp/wheels \
+    nvidia-cuda-runtime-cu12 nvidia-cublas-cu12 \
+    && rm -rf /tmp/wheels
 
 COPY . /app
 
