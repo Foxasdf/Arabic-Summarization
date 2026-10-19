@@ -245,11 +245,14 @@ def whisper_timing_words(asr_wav: Path, hyp_text: str, cache_tag: str = "C") -> 
 def score_segments_arm(name: str, ref_segments: List[Dict[str, Any]], segs: List[Dict[str, Any]],
                        audio_duration: float, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     diar = SS.score_diarization(ref_segments, segs, audio_duration)
-    agree = SS.segment_agreement(ref_segments, segs)
+    agree = SS.segment_agreement_weighted(ref_segments, segs)
     return {
         "arm": name,
         "n_segments": len(segs),
         "diar": diar,
         "seg_agreement": agree,
+        "agree": agree["pct_ok"],
+        "agree_word": agree["agree_word"],
+        "agree_duration": agree["agree_duration"],
         **(extra or {}),
     }

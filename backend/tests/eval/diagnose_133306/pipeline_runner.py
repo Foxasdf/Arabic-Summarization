@@ -180,15 +180,22 @@ def ensure_canonical_audio() -> Dict[str, Any]:
 def diarize_arms(asr_wav: Path, spk_wav: Path) -> Dict[str, Any]:
     """Diarize the canonical speaker WAV; production path. Cached.
 
-    Three runs: ``auto`` (production, min_speakers=2), ``oracle3`` (forced 3) and
-    ``min1`` (min_speakers=1) which reveals whether the "3 speakers" result is a
-    natural clustering outcome or merely the floor of the production range.
+    Three runs: ``auto`` (production min/max range), ``oracle{N}`` (speaker count
+    pinned to the reference's N) and ``min1`` (min_speakers=1), which reveals
+    whether the auto speaker count is a natural clustering outcome or merely the
+    floor of the production range.
+
+    N comes from the reference, never a constant, so the suite covers recordings
+    with different speaker counts.
     """
     from app.config import settings
     from app.services.diarization import diarize
 
+    n_ref_spk = len({s["speaker"] for s in C.ref_segments()})
+    oracle_label = f"oracle{n_ref_spk}"
+
     runs = {}
-    for label, n in (("auto", None), ("oracle3", 3), ("min1", None)):
+    for label, n in (("auto", None), (oracle_label, n_ref_spk), ("min1", None)):
         path = C.ARTIFACT_DIR / f"turns_{label}.json"
         if path.exists():
             runs[label] = {"turns": C.read_json(path), "wall_s": None, "source": "cache"}

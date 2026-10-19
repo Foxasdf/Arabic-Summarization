@@ -1,4 +1,8 @@
-"""Paths, constants and shared helpers for the 133306 diagnostic harness.
+"""Paths, constants and shared helpers for the diagnostic harness.
+
+Supports a multi-file suite. Every measurement is parameterised by a
+:class:`FileSpec`, and :func:`set_active` swaps the module-level globals so the
+existing single-file call sites keep working unchanged.
 
 Nothing here mutates ``backend/app/**``. The harness imports production functions
 the same way ``backend/app/api/routes.py`` does, and reaches into them only through
@@ -9,22 +13,114 @@ from __future__ import annotations
 import json
 import os
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Dict, List, Optional
 
 HERE = Path(__file__).resolve()
 ROOT = HERE.parents[4]
 BACKEND = ROOT / "backend"
-OUT_DIR = ROOT / "eval_results" / "diag_133306"
-ARTIFACT_DIR = OUT_DIR / "artifacts"
-CACHE_DIR = OUT_DIR / "cache"
-WORD_DIR = OUT_DIR / "word_alignments"
+OUT_ROOT = ROOT / "eval_results"
 
-AUDIO_SOURCE = ROOT / "20261011_133306.m4a"
-REF_JSON = ROOT / "transcription_20261011_133306.json"
-SHIPPED_MD = ROOT / "transcription_20261011_133306.md"
-SHIPPED_IMPROVED_MD = ROOT / "transcription_20261011_133306_IMPROVED.md"
-TERM_MAP = OUT_DIR / "term_map.json"
-FROZEN = ROOT / "eval_results" / "frozen_v1"
+
+@dataclass
+class FileSpec:
+    """One evaluated recording and where its artifacts live."""
+
+    key: str
+    audio: Path
+    ref_json: Path
+    out_dir: Path
+    shipped_md: Optional[Path] = None
+    shipped_improved_md: Optional[Path] = None
+    _ref_cache: List[Dict] = field(default_factory=list, repr=False)
+
+    @property
+    def artifact_dir(self) -> Path:
+        return self.out_dir / "artifacts"
+
+    @property
+    def word_dir(self) -> Path:
+        return self.out_dir / "word_alignments"
+
+    @property
+    def cache_dir(self) -> Path:
+        return self.out_dir / "cache"
+
+    def ensure_dirs(self) -> None:
+        for d in (self.out_dir, self.artifact_dir, self.word_dir, self.cache_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+    def ref(self) -> List[Dict]:
+        if not self._ref_cache:
+            self._ref_cache.append(read_json(self.ref_json)["segments"])
+        return self._ref_cache[0]
+
+    def duration(self) -> float:
+        segs = self.ref()
+        if not segs:
+            return 0.0
+        d = read_json(self.ref_json).get("duration_seconds")
+        if d:
+            return float(d)
+        return max(float(s["end"]) for s in segs)
+
+
+def _spec(key: str, audio: str, ref: str, out: str,
+          md: Optional[str] = None, md_imp: Optional[str] = None) -> FileSpec:
+    return FileSpec(
+        key=key,
+        audio=ROOT / audio,
+        ref_json=ROOT / ref,
+        out_dir=OUT_ROOT / out,
+        shipped_md=(ROOT / md) if md else None,
+        shipped_improved_md=(ROOT / md_imp) if md_imp else None,
+    )
+
+
+SUITE: Dict[str, FileSpec] = {
+    "133306": _spec("133306", "20261011_133306.m4a", "transcription_20261011_133306.json",
+                    "diag_133306", "transcription_20261011_133306.md",
+                    "transcription_20261011_133306_IMPROVED.md"),
+    "nlp_5min": _spec("nlp_5min", "audio_nlp_1_5min.wav", "transcription_nlp_5min.json",
+                      "diag_nlp_5min", "transcription_nlp_5min.md"),
+}
+
+PRIMARY = "133306"
+VALIDATION = "nlp_5min"
+
+# --- active-file globals (rebound by set_active) ---------------------------
+ACTIVE: FileSpec = SUITE[PRIMARY]
+OUT_DIR: Path = ACTIVE.out_dir
+ARTIFACT_DIR: Path = ACTIVE.artifact_dir
+CACHE_DIR: Path = ACTIVE.cache_dir
+WORD_DIR: Path = ACTIVE.word_dir
+AUDIO_SOURCE: Path = ACTIVE.audio
+REF_JSON: Path = ACTIVE.ref_json
+SHIPPED_MD: Optional[Path] = ACTIVE.shipped_md
+SHIPPED_IMPROVED_MD: Optional[Path] = ACTIVE.shipped_improved_md
+
+
+def set_active(key: str) -> FileSpec:
+    """Point every module-level path global at one suite member."""
+    global ACTIVE, OUT_DIR, ARTIFACT_DIR, CACHE_DIR, WORD_DIR
+    global AUDIO_SOURCE, REF_JSON, SHIPPED_MD, SHIPPED_IMPROVED_MD
+    spec = SUITE[key]
+    spec.ensure_dirs()
+    ACTIVE = spec
+    OUT_DIR = spec.out_dir
+    ARTIFACT_DIR = spec.artifact_dir
+    CACHE_DIR = spec.cache_dir
+    WORD_DIR = spec.word_dir
+    AUDIO_SOURCE = spec.audio
+    REF_JSON = spec.ref_json
+    SHIPPED_MD = spec.shipped_md
+    SHIPPED_IMPROVED_MD = spec.shipped_improved_md
+    return spec
+
+
+TERM_MAP = OUT_ROOT / "diag_133306" / "term_map.json"
+FROZEN = OUT_ROOT / "frozen_v1"
 
 COLLAR = 0.25  # fixed by eval_results/frozen_v1/RULES.md; never tune
 FRAME = 0.01
@@ -48,7 +144,7 @@ SNAPSHOT_SETTINGS = [
 ]
 
 ARM_A = "A_pipeline"        # production functions unchanged
-ARM_A_ORACLE = "A_oracle3"  # production functions, oracle speaker count
+ARM_A_ORACLE = "A_oracle"  # production functions, oracle speaker count
 ARM_A_BUILDER = "A_builder"  # production diarization + uniform words -> ref-text builder check
 ARM_B_BISECTION = "B_bisection"
 ARM_C_WHISPER = "C_whisper_timing"
@@ -56,6 +152,7 @@ ARM_D_PER_TURN = "D_per_turn"
 
 
 def ensure_dirs() -> None:
+    ACTIVE.ensure_dirs()
     for d in (OUT_DIR, ARTIFACT_DIR, CACHE_DIR, WORD_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
@@ -117,7 +214,7 @@ def write_json(path: Path, payload) -> None:
 
 
 def ref_segments() -> list[dict]:
-    return read_json(REF_JSON)["segments"]
+    return ACTIVE.ref()
 
 
 def ts(sec: float) -> str:

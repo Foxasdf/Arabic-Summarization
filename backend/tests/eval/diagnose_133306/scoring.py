@@ -108,6 +108,28 @@ def wer_cer(ref: str, hyp: str) -> Dict[str, Any]:
     return calculate_wer_cer(ref, hyp, ArabicTextNormalizer())
 
 
+def wer_dialect_norm(ref: str, hyp: str) -> Dict[str, Any]:
+    """WER after collapsing documented Levantine<->MSA spelling differences.
+
+    Diagnostic only -- it never replaces ``wer_norm`` and is never fed back into
+    the pipeline. The gap between ``wer_norm`` and ``wer_dialect_norm`` estimates
+    how much of the residual error is spelling convention rather than acoustic
+    misrecognition: if Cohere heard "كتير" and the reference writes "كثير", the
+    model was right and the scorer was pedantic.
+
+    The rules are applied symmetrically to both sides, so the metric cannot be
+    gamed by a hypothesis that merely respells everything.
+    """
+    from . import candidates as CN
+
+    from app.services.preprocessing.normalizer import ArabicTextNormalizer
+
+    norm = ArabicTextNormalizer()
+    r = CN.dialect_norm_text(norm.normalize(ref))
+    h = CN.dialect_norm_text(norm.normalize(hyp))
+    return wer_cer(r, h)
+
+
 def subsequence_wer(ref: str, hyp: str) -> Dict[str, Any]:
     """Cross-check metric: difflib opcodes on normalised tokens (independent of our DP)."""
     from app.services.preprocessing.normalizer import ArabicTextNormalizer
@@ -157,6 +179,7 @@ def score_text(ref_segments: List[Dict[str, Any]], hyp_segments: List[Dict[str, 
     ref_text = " ".join(s.get("text", "") for s in ref_segments).strip()
     hyp_text = " ".join(s.get("text", "") for s in hyp_segments).strip()
     base = wer_cer(ref_text, hyp_text)
+    dnorm = wer_dialect_norm(ref_text, hyp_text)
     return {
         "n_segments_hyp": len(hyp_segments),
         "ref_words": base["ref_word_count"],
@@ -168,6 +191,9 @@ def score_text(ref_segments: List[Dict[str, Any]], hyp_segments: List[Dict[str, 
         "subs": base["substitutions"],
         "dels": base["deletions"],
         "ins": base["insertions"],
+        "wer_dialect_norm": dnorm["norm_wer"],
+        "wer_dialect_gap": round(base["norm_wer"] - dnorm["norm_wer"], 4),
+        "dialect_subs": dnorm["substitutions"],
         "subseq": subsequence_wer(ref_text, hyp_text),
         "per_speaker": per_speaker_wer(ref_segments, hyp_segments),
         "hyp_text": hyp_text,

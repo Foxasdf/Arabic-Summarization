@@ -239,3 +239,55 @@ def segment_agreement(ref_segments: List[Dict[str, Any]], hyp_segments: List[Dic
         "pct_ok": round(100.0 * ok / max(1, total), 1),
         "wrong_segments": wrong,
     }
+
+
+def segment_agreement_weighted(ref_segments: List[Dict[str, Any]],
+                               hyp_segments: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Speaker agreement weighted by words and by duration.
+
+    Unweighted agreement counts a 0.26 s one-word backchannel ("طيب") exactly like a
+    37 s sixty-word turn, which hides real progress: a system can fix every long
+    turn while the *count* of segments stays dominated by short interjections that
+    are intrinsically hard to attribute correctly.
+
+    Word-weighted  = share of hypothesis words whose segment carries the correct
+                     majority reference speaker.
+    Duration-weighted = same, weighted by each segment's speech seconds.
+    Both are computed over the same per-segment correctness decision as
+    ``segment_agreement`` so the three numbers cannot contradict each other.
+    """
+    base = segment_agreement(ref_segments, hyp_segments)
+    ref_turns = [{"start": s["start"], "end": s["end"], "speaker": s["speaker"]} for s in ref_segments]
+    rf = _frames(resolve_midpoints(ref_turns), max(s["end"] for s in ref_segments) + 1.0)
+
+    words_ok = words_total = 0
+    dur_ok = dur_total = 0.0
+    for h in hyp_segments:
+        n_words = len((h.get("text") or "").split())
+        dur = max(0.0, float(h["end"]) - float(h["start"]))
+        s = max(0, int(round(h["start"] / FRAME)))
+        e = min(len(rf), int(round(h["end"] / FRAME)))
+        votes: Dict[str, int] = {}
+        for i in range(s, e):
+            v = rf[i]
+            if v:
+                votes[v] = votes.get(v, 0) + 1
+        if not votes:
+            continue  # no reference speech under this segment: excluded from both
+        major = max(votes.items(), key=lambda kv: kv[1])[0]
+        good = major == h["speaker"]
+        words_total += n_words
+        dur_total += dur
+        if good:
+            words_ok += n_words
+            dur_ok += dur
+
+    return {
+        "pct_ok": base["pct_ok"],
+        "agree_word": round(100.0 * words_ok / max(1, words_total), 1),
+        "agree_duration": round(100.0 * dur_ok / max(1e-6, dur_total), 1),
+        "words_counted": words_total,
+        "duration_counted_s": round(dur_total, 2),
+        "segments_checked": base["segments_checked"],
+        "wrong_segments": base["wrong_segments"],
+    }

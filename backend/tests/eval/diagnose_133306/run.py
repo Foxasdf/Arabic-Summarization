@@ -29,12 +29,23 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-from .config import BACKEND, ROOT  # noqa: E402  (path bootstrap below)
-
-sys.path.insert(0, str(BACKEND))
-sys.path.insert(0, str(ROOT / "backend" / "tests" / "eval"))
+# Import the package under ONE name only. Previously this module also put
+# backend/tests/eval on sys.path and did `from diagnose_133306 import config`,
+# which created a SECOND copy of the package: set_active() rebound the globals in
+# one copy while the pipeline modules read the other, so a 300 s recording was
+# silently measured with the 397.8 s audio and its cached artifacts.
+#
+# Anchor every import to the package's own directory so `python -m
+# backend.tests.eval.diagnose_133306.run` and a direct script launch resolve to
+# the same module objects.
+_HERE = Path(__file__).resolve()
+_PKG_PARENT = _HERE.parents[1]  # backend/tests/eval
+if str(_PKG_PARENT) not in sys.path:
+    sys.path.insert(0, str(_PKG_PARENT))
 
 from diagnose_133306 import config as C  # noqa: E402
+
+sys.path.insert(0, str(C.BACKEND))
 
 C.bootstrap_sys_path()
 C.add_torch_dll_dirs()
@@ -195,11 +206,12 @@ def stage_arms() -> dict:
 
     C.ensure_dirs()
     ref = C.ref_segments()
+    n_ref_spk = len({s["speaker"] for s in ref})
     turns_auto = C.read_json(C.ARTIFACT_DIR / "turns_auto.json")
-    turns_oracle = C.read_json(C.ARTIFACT_DIR / "turns_oracle3.json")
+    turns_oracle = C.read_json(C.ARTIFACT_DIR / f"turns_oracle{n_ref_spk}.json")
     captured = C.read_json(C.ARTIFACT_DIR / "captured_asr_uniform.json")
     asr_wav = C.ARTIFACT_DIR / "asr.16k.wav"
-    audio_dur = float(captured.get("audio_duration") or 397.8)
+    audio_dur = float(captured.get("audio_duration") or C.ACTIVE.duration())
 
     result: dict = {}
 
@@ -226,7 +238,7 @@ def stage_arms() -> dict:
     arms = {}
     words_uniform = captured["words"]
     arms["A_uniform"] = _from_words(words_uniform, turns_auto, "A_uniform")
-    arms["A_oracle3"] = _from_words(words_uniform, turns_oracle, "A_oracle3")
+    arms["A_oracle"] = _from_words(words_uniform, turns_oracle, "A_oracle")
 
     bis_path = C.ARTIFACT_DIR / "captured_asr_bisection.json"
     if bis_path.exists():
@@ -253,7 +265,7 @@ def stage_arms() -> dict:
                         "n_words": len(wc["words"])}
         arms["C_whisper_timing"] = _from_words(wc["words"], turns_auto, "C_whisper_timing")
         arms["C_whisper_timing"]["resources"] = wc["resources"]
-        arms["C_whisper_oracle3"] = _from_words(wc["words"], turns_oracle, "C_whisper_oracle3")
+        arms["C_whisper_oracle"] = _from_words(wc["words"], turns_oracle, "C_whisper_oracle")
     except Exception as e:
         _log(f"Arm C failed: {e}")
         whisper_meta = {"status": "error", "error": repr(e)}
@@ -303,28 +315,208 @@ def stage_score_and_report() -> dict:
     return metrics
 
 
+# ---------------------------------------------------------------------------
+# stage: candidates (runtime patches, paired against the same captured audio)
+# ---------------------------------------------------------------------------
+def stage_candidates() -> dict:
+    from . import candidate_eval as CE
+
+    C.ensure_dirs()
+    path = C.OUT_DIR / "candidates.json"
+    out = C.read_json(path) if path.exists() else {}
+
+    _log("candidate: hardened transcription-credit regex...")
+    out["credit_regex"] = CE.evaluate_text_candidate(C.ACTIVE.key, "credit_regex")
+    _log(f"  WER {out['credit_regex']['wer_before']} -> {out['credit_regex']['wer_after']} "
+         f"({out['credit_regex']['delta']:+.4f}), words {out['credit_regex']['words_delta']:+d}, "
+         f"slices changed {len(out['credit_regex']['slices_changed'])}")
+
+    _log("candidate: engine word-list handoff (capability probe)...")
+    out["engine_words"] = CE.evaluate_engine_words(C.ACTIVE.key)
+    _log(f"  emits {out['engine_words']['n_words']} words "
+         f"(text {out['engine_words']['n_text_words']}), valid={out['engine_words']['passes_validation']}")
+
+    _log("candidate: fuzzy seam dedupe (fresh Cohere pass)...")
+    try:
+        out["fuzzy_seam"] = CE.evaluate_fuzzy_seam(C.ACTIVE.key)
+        b, a = out["fuzzy_seam"]["baseline"], out["fuzzy_seam"]["candidate_metrics"]
+        _log(f"  DER {b['der']} -> {a['der']}, words {out['fuzzy_seam']['words_before']} -> "
+             f"{out['fuzzy_seam']['words_after']}")
+    except Exception as e:
+        out["fuzzy_seam"] = {"error": repr(e)}
+        _log(f"  fuzzy seam failed: {e}")
+
+    _log("candidate: VAD-aware word timing...")
+    try:
+        out["vad_word_timing"] = CE.evaluate_vad_word_timing(C.ACTIVE.key)
+        b, a = out["vad_word_timing"]["baseline"], out["vad_word_timing"]["candidate_metrics"]
+        _log(f"  DER {b['der']} -> {a['der']} ({a['der'] - b['der']:+.4f}), "
+             f"masks {out['vad_word_timing']['slices_with_mask']}/{out['vad_word_timing']['n_slices']}")
+    except Exception as e:
+        out["vad_word_timing"] = {"error": repr(e)}
+        _log(f"  vad timing failed: {e}")
+
+    _log("candidate: Pyannote boundary snapping...")
+    try:
+        out["snap_words"] = CE.evaluate_snap_words(C.ACTIVE.key)
+        b, a = out["snap_words"]["baseline"], out["snap_words"]["candidate_metrics"]
+        _log(f"  DER {b['der']} -> {a['der']} ({a['der'] - b['der']:+.4f}), "
+             f"moved {out['snap_words']['words_moved']}/{out['snap_words']['n_words']}")
+    except Exception as e:
+        out["snap_words"] = {"error": repr(e)}
+        _log(f"  snap words failed: {e}")
+
+    C.write_json(path, out)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# stage: suite (cross-file tables, macro average, joint gates)
+# ---------------------------------------------------------------------------
+def stage_suite() -> dict:
+    from . import suite_report as SR
+
+    keys = list(C.SUITE)
+    records = []
+    for k in keys:
+        C.set_active(k)
+        try:
+            records.append(SR.file_metrics(k))
+        except Exception as e:
+            _log(f"suite: {k} skipped ({e})")
+
+    cand: Dict[str, Dict[str, Any]] = {}
+    for k in keys:
+        p = C.SUITE[k].out_dir / "candidates.json"
+        if p.exists():
+            cand[k] = C.read_json(p)
+
+    gates = []
+    notes = []
+
+    # --- Arm C: does Whisper word timing beat production on BOTH files? ---
+    if all((r["arms"].get("C_whisper_timing") or {}).get("der") is not None for r in records):
+        der_b = {r["key"]: r["production"]["der"] for r in records}
+        der_a = {r["key"]: r["arms"]["C_whisper_timing"]["der"] for r in records}
+        gates.append(SR.two_file_gate("Arm C — DER", der_b, der_a, "DER (ref_tiles)",
+                                      higher_is_better=False, tol=SR.TOL_DER))
+        w_b = {r["key"]: r["production"]["agree_word"] for r in records}
+        w_a = {r["key"]: r["arms"]["C_whisper_timing"]["agree_word"] for r in records}
+        gates.append(SR.two_file_gate("Arm C — word agreement", w_b, w_a,
+                                      "agreement (word)", higher_is_better=True))
+
+    # --- candidate 1: hardened credit regex -------------------------------
+    if all(("credit_regex" in cand.get(k, {})) for k in keys):
+        before = {k: cand[k]["credit_regex"]["wer_before"] for k in keys}
+        after = {k: cand[k]["credit_regex"]["wer_after"] for k in keys}
+        # A recall-only fix: it can only restore text that the old rule wrongly
+        # deleted, and it provably cannot touch a slice the old rule left alone.
+        # So zero regression is the hard requirement and any gain at all is a win.
+        gates.append(SR.two_file_gate("1. hardened credit regex", before, after,
+                                      "WER (norm)", higher_is_better=False,
+                                      tol=SR.TOL_WER, min_gain=0.0001))
+        rec = sum(cand[k]["credit_regex"]["words_delta"] for k in keys)
+        notes.append(f"Credit-regex candidate recovered **{rec:+d}** words across both files; "
+                     f"slices touched: "
+                     + ", ".join(f"{k}={len(cand[k]['credit_regex']['slices_changed'])}" for k in keys)
+                     + ". Zero slices changed on the validation file is the required zero-FP result.")
+
+    # --- candidate 2: engine words ---------------------------------------
+    if all(("engine_words" in cand.get(k, {})) for k in keys):
+        ok = all(cand[k]["engine_words"]["passes_validation"] for k in keys)
+        notes.append(f"Engine word-list handoff: every file's captured pass emits a word list that passes "
+                     f"production's own count validation "
+                     f"({', '.join(str(cand[k]['engine_words']['n_words']) + '/' + str(cand[k]['engine_words']['n_text_words']) for k in keys)}); "
+                     f"the list was discarded only because `has_word_timestamps` is undefined "
+                     f"on every engine class. Validity: **{'PASS' if ok else 'FAIL'}**.")
+
+    # --- candidate 3: fuzzy seam -----------------------------------------
+    fs_ok = all("fuzzy_seam" in cand.get(k, {}) and "error" not in cand[k]["fuzzy_seam"] for k in keys)
+    if fs_ok:
+        before = {k: cand[k]["fuzzy_seam"]["baseline"]["der"] for k in keys}
+        after = {k: cand[k]["fuzzy_seam"]["candidate_metrics"]["der"] for k in keys}
+        g = SR.two_file_gate("3. fuzzy seam dedupe", before, after, "DER (ref_tiles)",
+                             higher_is_better=False, tol=SR.TOL_DER, min_gain=0.0001)
+        gates.append(g)
+        ab = {k: cand[k]["fuzzy_seam"]["baseline"]["agree_word"] for k in keys}
+        aa = {k: cand[k]["fuzzy_seam"]["candidate_metrics"]["agree_word"] for k in keys}
+        gates.append(SR.two_file_gate("3b. fuzzy seam — word agreement", ab, aa,
+                                      "agreement (word)", higher_is_better=True))
+    else:
+        notes.append("Fuzzy seam dedupe: could not be evaluated on every file.")
+
+    # --- candidate 4: VAD-aware word timing -------------------------------
+    if all(("vad_word_timing" in cand.get(k, {})) for k in keys):
+        before = {k: cand[k]["vad_word_timing"]["baseline"]["der"] for k in keys}
+        after = {k: cand[k]["vad_word_timing"]["candidate_metrics"]["der"] for k in keys}
+        gates.append(SR.two_file_gate("4. VAD-aware word timing", before, after,
+                                      "DER (ref_tiles)", higher_is_better=False,
+                                      tol=SR.TOL_DER, min_gain=0.0001))
+        ab = {k: cand[k]["vad_word_timing"]["baseline"]["agree_word"] for k in keys}
+        aa = {k: cand[k]["vad_word_timing"]["candidate_metrics"]["agree_word"] for k in keys}
+        gates.append(SR.two_file_gate("4b. VAD-aware word timing — word agreement", ab, aa,
+                                      "agreement (word)", higher_is_better=True))
+
+    # --- candidate 5: Pyannote boundary snapping --------------------------
+    if all(("snap_words" in cand.get(k, {})) for k in keys):
+        before = {k: cand[k]["snap_words"]["baseline"]["der"] for k in keys}
+        after = {k: cand[k]["snap_words"]["candidate_metrics"]["der"] for k in keys}
+        gates.append(SR.two_file_gate("5. Pyannote boundary snapping", before, after,
+                                      "DER (ref_tiles)", higher_is_better=False,
+                                      tol=SR.TOL_DER, min_gain=0.0001))
+
+    out = {
+        "files": records,
+        "macro": SR.macro_average(records),
+        "gates": gates,
+        "notes": notes,
+        "candidates": cand,
+    }
+    C.set_active(keys[0])
+    C.write_json(C.OUT_ROOT / "suite" / "suite.json", out)
+    md = SR.render_suite(records, gates, notes, rec_cand=cand)
+    p = C.OUT_ROOT / "suite" / "suite.md"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(md, encoding="utf-8")
+    _log(f"suite written to {p}")
+    for g in gates:
+        _log(f"  gate {g['candidate']}: {g['status']}")
+    return out
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--stage", default="all",
-                    choices=["verify", "repro", "arms", "score", "report", "all"])
+                    choices=["verify", "repro", "arms", "candidates", "score", "report",
+                             "suite", "all"])
+    ap.add_argument("--file", default=None,
+                    help="suite member key (default: all members, primary first)")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args(argv)
     _configure_logging(args.verbose)
-    C.ensure_dirs()
 
+    keys = [args.file] if args.file else list(C.SUITE)
     t0 = time.time()
-    if args.stage in ("verify", "all"):
-        stage_verify()
-    if args.stage in ("repro", "all"):
-        stage_repro()
-    if args.stage in ("arms", "all"):
-        stage_arms()
-    if args.stage in ("score", "report", "all"):
-        m = stage_score_and_report()
-        _log(f"metrics written to {C.OUT_DIR / 'metrics.json'}")
-        for row in m.get("summary_rows", []):
-            _log(row)
-    _log(f"stage '{args.stage}' complete in {time.time() - t0:.1f}s")
+    for key in keys:
+        C.set_active(key)
+        C.ensure_dirs()
+        _log(f"=== {key} ({C.AUDIO_SOURCE.name}) ===")
+        if args.stage in ("verify", "all"):
+            stage_verify()
+        if args.stage in ("repro", "all"):
+            stage_repro()
+        if args.stage in ("arms", "all"):
+            stage_arms()
+        if args.stage in ("candidates", "all"):
+            stage_candidates()
+        if args.stage in ("score", "report", "all"):
+            m = stage_score_and_report()
+            _log(f"metrics written to {C.OUT_DIR / 'metrics.json'}")
+            for row in m.get("summary_rows", []):
+                _log(row)
+    if args.stage in ("suite", "report", "score", "all") or (args.stage == "suite"):
+        stage_suite()
+    _log(f"stage '{args.stage}' complete for {keys} in {time.time() - t0:.1f}s")
     return 0
 
 

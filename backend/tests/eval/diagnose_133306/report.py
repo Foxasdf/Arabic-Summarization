@@ -115,7 +115,8 @@ def build_metrics() -> Dict[str, Any]:
     turns_min1 = _load_artifact("turns_min1.json") or []
     captured = _load_artifact("captured_asr_uniform.json") or {}
     tr = _load_artifact("transcribe_with_speakers.json") or {}
-    audio_dur = float(captured.get("audio_duration") or verify.get("audio_duration") or 397.8)
+    n_ref_spk = len({s["speaker"] for s in ref})
+    audio_dur = float(captured.get("audio_duration") or verify.get("audio_duration") or C.ACTIVE.duration())
 
     text_click = scoring.score_text(ref, tr.get("segments") or [])
     term_probe = scoring.term_map_probe(ref, tr.get("segments") or [])
@@ -257,7 +258,7 @@ def build_metrics() -> Dict[str, Any]:
             "speakers_auto": len({t["speaker"] for t in turns_auto}),
             "speakers_min1": len({t["speaker"] for t in turns_min1}),
             "auto_equals_min1": turns_auto == turns_min1,
-            "auto_equals_oracle3": turns_auto == (_load_artifact("turns_oracle3.json") or None),
+            "auto_equals_oracle": turns_auto == (_load_artifact(f"turns_oracle{n_ref_spk}.json") or None),
         },
         "pipeline": {
             "segments": len(tr.get("segments") or []),
@@ -312,7 +313,7 @@ def _parse_shipped() -> Dict[str, Any]:
     """Parse the shipped transcripts into segments so they can be scored like an arm."""
     out: Dict[str, Any] = {}
     for label, path in (("shipped_md", C.SHIPPED_MD), ("improved_md", C.SHIPPED_IMPROVED_MD)):
-        if not path.exists():
+        if path is None or not path.exists():
             continue
         segs: List[Dict[str, Any]] = []
         for line in path.read_text(encoding="utf-8").splitlines():
@@ -348,9 +349,10 @@ def render_markdown(m: Dict[str, Any]) -> str:
     p = m["pipeline"]
     t = p["text"]
     d = m["diarization"]
+    n_ref_spk = len(ref["speakers"])
     L: List[str] = []
 
-    L.append("# Cohere ASR + speaker separation: why 20261011_133306 goes wrong\n")
+    L.append(f"# Cohere ASR + speaker separation: why {meta.get('file_key', meta['audio'])} goes wrong\n")
     L.append(f"Test run on **{meta['audio']}** ({meta['audio_duration_s']:.2f} s), scored against the "
              f"human reference ({ref['segments']} segments, {ref['words']} words, "
              f"{ref['speech_s']} s speech, {len(ref['speakers'])} speakers).\n")
@@ -383,14 +385,14 @@ def render_markdown(m: Dict[str, Any]) -> str:
              f"the same seam-dedup, uniform-timing and guardrail code paths as production.\n")
 
     L.append("## 2. Where the speaker labels actually come from\n")
-    L.append("Cohere reports `max_timestamp_kind='none'` and `supports_native_diarization=False`, so "
-             "`has_word_timestamps` is absent, the engine's own word list is discarded, and "
-             "`forced_alignment` reconstructs timing. Two arms test that directly:\n")
-    L.append("| arm | what it isolates | segments | DER | speaker agreement |")
+    L.append(f"The engine advertises no native word-timestamp capability, so the engine's own word list is "
+             f"discarded and `forced_alignment` reconstructs timing. Arms test that directly. "
+             f"Reference has **{n_ref_spk}** speakers here:\n")
+    L.append("| arm | what it isolates | segments | DER | agreement |")
     L.append("|---|---|---:|---:|---:|")
     for key, label, what in (
         ("A_uniform", "captured text, uniform timing", "shipped timing model"),
-        ("A_oracle3", "same, forced 3 speakers", "speaker count pinned to truth"),
+        ("A_oracle", f"same, forced {n_ref_spk} speakers", "speaker count pinned to truth"),
         ("A_production_segments", "shipped end-to-end", "what the product emits"),
         ("C_whisper_timing", "Cohere text + Whisper word times", "real acoustic word boundaries"),
         ("B_bisection", "Cohere text, silence-bisected times", "energy-based timing"),
@@ -399,13 +401,16 @@ def render_markdown(m: Dict[str, Any]) -> str:
         a = m["arms"].get(key)
         if not a:
             continue
-        L.append(f"| {label} | {what} | {a['n_segments']} | {_f(a['der_ref'])} | {_f(a['agree'], 1)}% |")
+        agree_txt = _f(a.get("agree_word"), 1) if a.get("agree_word") is not None else _f(a.get("agree"), 1)
+        L.append(f"| {label} | {what} | {a['n_segments']} | {_f(a['der_ref'])} | {agree_txt}% |")
+    L.append("")
+    L.append("(agreement column = **word-weighted**, so backchannels no longer count as much as full turns.)")
     L.append("")
     L.append("Reading the table:")
-    L.append(f"- `A_uniform` and `A_oracle3` are **byte-identical**, so the 3-speaker result is a genuine "
-             f"clustering outcome, not an artefact of the `min_speakers=2` floor. Re-running diarization with "
-             f"`min_speakers=1` still returns exactly {d['speakers_min1']} speakers and {d['n_turns_min1']} turns "
-             f"({d['auto_equals_min1']} identical to the default run).")
+    L.append(f"- `A_uniform` and `A_oracle` are **byte-identical**, so the {d['speakers_auto']}-speaker result is a "
+             f"genuine clustering outcome, not an artefact of the `min_speakers` floor. Re-running diarization "
+             f"with `min_speakers=1` still returns exactly {d['speakers_min1']} speakers and "
+             f"{d['n_turns_min1']} turns ({d['auto_equals_min1']} identical to the default run).")
     L.append(f"- `A_production_segments` is *worse* (DER {_f(m['arms']['A_production_segments']['der_ref'])}) than the "
              f"same text with the diagnostic timing (DER {_f(m['arms']['A_uniform']['der_ref'])}), and worse than the "
              f"raw diarization ceiling (DER {_f(d['raw_der'])}). The pipeline is actively destroying speaker "
