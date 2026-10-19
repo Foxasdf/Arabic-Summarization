@@ -533,7 +533,9 @@ def stage_suite() -> dict:
             from . import recovery_gate as RG
 
             sweep_path = C.SUITE[k].out_dir / "recovery.json"
-            gate_path = C.SUITE[k].out_dir / "recovery_gate.json"
+            # Prefer the best gated run (zero false positives) over the ungated one.
+            gated = C.SUITE[k].out_dir / "recovery_gate_wps_0.3to3.json"
+            gate_path = gated if gated.exists() else C.SUITE[k].out_dir / "recovery_gate.json"
             entry: Dict[str, Any] = {}
             if sweep_path.exists():
                 entry["sweep"] = R.summarize(C.read_json(sweep_path))
@@ -550,6 +552,32 @@ def stage_suite() -> dict:
                 _log(f"recovery {k}: DER {g['baseline']['der']} -> {g['recovered']['der']} "
                      f"({g['d_der']:+.4f}), WER {g['baseline']['wer_norm']} -> {g['recovered']['wer_norm']}")
 
+    # --- discriminator sweep (reference-free rules vs reference labels) ----
+    disc_rows_list: List[str] = []
+    try:
+        from . import discriminate as DIS
+
+        col = {k: DIS.collect(k) for k in keys}
+        sweep = DIS.evaluate_thresholds(col)
+        for rule, pf in sweep.items():
+            p1, p2 = pf.get("133306") or {}, pf.get("nlp_5min") or {}
+            if not p1 or not p2:
+                continue
+
+            def _fmt(v, key):
+                x = v.get(key)
+                if x is None:
+                    return "—"
+                return f"{x:.2f}" if key in ("precision", "recall") else str(x)
+
+            disc_rows_list.append(
+                f"| `{rule}` | {p1['tp']}/{p1['fp']}/{p1['fn']} | {_fmt(p1, 'precision')} | "
+                f"{_fmt(p1, 'recall')} | {p2['tp']}/{p2['fp']}/{p2['fn']} | "
+                f"{_fmt(p2, 'precision')} | {_fmt(p2, 'recall')} |")
+        _log(f"discriminator: {len(sweep)} rules swept")
+    except Exception as e:
+        _log(f"discriminator unavailable: {e}")
+
     out = {
         "files": records,
         "macro": SR.macro_average(records),
@@ -558,11 +586,12 @@ def stage_suite() -> dict:
         "candidates": cand,
         "frontier": fr,
         "recovery": recov,
+        "discriminator": disc_rows_list,
     }
     C.set_active(keys[0])
     C.write_json(C.OUT_ROOT / "suite" / "suite.json", out)
     md = SR.render_suite(records, gates, notes, rec_cand=cand, rec_e2e=e2e,
-                         frontier=fr, recovery=recov)
+                         frontier=fr, recovery=recov, disc_rows=disc_rows_list)
     p = C.OUT_ROOT / "suite" / "suite.md"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(md, encoding="utf-8")

@@ -243,7 +243,8 @@ def render_suite(records: List[Dict[str, Any]], gates: List[Dict[str, Any]],
                  rec_cand: Optional[Dict[str, Dict[str, Any]]] = None,
                  rec_e2e: Optional[Dict[str, Dict[str, Any]]] = None,
                  frontier: Optional[Dict[str, Any]] = None,
-                 recovery: Optional[Dict[str, Dict[str, Any]]] = None) -> str:
+                 recovery: Optional[Dict[str, Dict[str, Any]]] = None,
+                 disc_rows: Optional[List[str]] = None) -> str:
     rec_cand = rec_cand or {}
     rec_e2e = rec_e2e or {}
     recovery = recovery or {}
@@ -521,6 +522,37 @@ def render_suite(records: List[Dict[str, Any]], gates: List[Dict[str, Any]],
                  "insertion errors than it recovers. Making this a win needs a way to tell a genuine "
                  "dropped-utterance from a pause before inserting — which the current signals do not "
                  "provide, since both are loud, unbounded in Pyannote, and wordless.\n")
+
+        L.append("### What was tried to rescue it, and where it stopped\n")
+        L.append("A pause and a dropped utterance are both loud, Pyannote-bounded and wordless, so the "
+                 "discriminator has to come from the *decode*. Several reference-free rules were swept; "
+                 "precision/recall against reference labels (labels used only for scoring the rule, never "
+                 "as an input):\n")
+        L.append("| rule | 133306 tp/fp/fn | precision | recall | nlp_5min tp/fp/fn | precision | recall |")
+        L.append("|---|---|---:|---:|---|---:|---:|")
+        if disc_rows:
+            for row in disc_rows:
+                L.append(row)
+        L.append("")
+        L.append("The best rule is a **decode-rate** test: ordinary Arabic speech runs ~2 words/s, so a short "
+                 "hole decoding at 6–8 words/s is not recovering speech *from the hole* — it is pulling in the "
+                 "surrounding utterances. `wps in 0.3–3` reaches **precision 1.00 on both files** (0 false "
+                 "positives) and lifts WER from +0.060 to **+0.0245** on `133306` while keeping the DER win. "
+                 "Placing the recovered words where the hole actually has energy instead of spacing them "
+                 "uniformly — the hole 78.5–87.3 s contains a 5.5 s pause followed by real speech, so uniform "
+                 "spacing put the words ~5 s early — improved DER further to −0.0165.\n")
+        L.append("That is where it stops. WER **still regresses on both files**, and the reason is now "
+                 "specific rather than vague: the discriminating cases are structurally indistinguishable at "
+                 "this level. In the 8.8 s hole the speaker's own line is preceded by laughter "
+                 "(`اي طيب ماشي (ضحك)`), which carries as much energy as the speech that follows, so neither "
+                 "an energy anchor nor a decode-rate test can place the words on the right side of it. Every "
+                 "rule strict enough to protect WER also drops true misses (recall ≤ 0.67), and every rule "
+                 "permissive enough to keep them reintroduces the insertions.\n")
+        L.append("Conclusion: recovering dropped words is a real capability, but it cannot be bolted on "
+                 "after transcription with synthetic timestamps. It needs word-level timing for the "
+                 "recovered span — the same thing Arm C supplies for the main pass — because without it the "
+                 "inserted words are attributed to whichever speaker the interpolation happened to place "
+                 "them next to, and that is what the WER regression actually measures.\n")
     L.append("")
 
     L.append("## Error attribution per file\n")

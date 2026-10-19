@@ -59,6 +59,49 @@ def _norm(w: str) -> str:
     return re.sub(r"[^\w\u0600-\u06FF]", "", w or "")
 
 
+def _energy_span(a, sr: int, lo: float, hi: float,
+                 rel_db: float = -12.0) -> tuple:
+    """Locate the loudest contiguous stretch inside a hole.
+
+    A hole is defined by words being absent, which is not the same as audio being
+    absent: the 8.8 s hole on 133306 runs 78.5-87.3 s and contains a 5.5 s pause
+    followed by real speech. Spreading recovered words uniformly across the whole
+    hole therefore places them seconds too early, which silently mis-assigns them
+    to the wrong speaker and costs WER while DER looks improved.
+
+    Anchoring on where the energy actually is fixes the placement without needing
+    a reference or a per-file constant: the threshold is relative to the hole's own
+    peak, so it adapts to each recording.
+    """
+    import numpy as np
+
+    lo_i = max(0, int(lo * sr))
+    hi_i = min(len(a), int(hi * sr))
+    if hi_i <= lo_i:
+        return lo, hi
+
+    seg = a[lo_i:hi_i].astype("float32") / 32768.0
+    win = max(1, int(0.1 * sr))          # 100 ms frames
+    n = len(seg) // win
+    if n < 2:
+        return lo, hi
+
+    frames = seg[: n * win].reshape(n, win)
+    rms = np.sqrt((frames ** 2).mean(axis=1)) + 1e-9
+    db = 20.0 * np.log10(rms)
+    peak = float(db.max())
+    voiced = db >= peak + rel_db
+    if not voiced.any():
+        return lo, hi
+
+    idx = np.where(voiced)[0]
+    start_t = lo + idx[0] * win / sr
+    end_t = lo + (idx[-1] + 1) * win / sr
+    if end_t - start_t < 0.2:
+        return lo, hi
+    return float(start_t), float(end_t)
+
+
 def _trim_overlap(decoded: List[Dict[str, Any]],
                   before: List[str], after: List[str],
                   max_trim: int = 8) -> List[Dict[str, Any]]:
@@ -90,9 +133,15 @@ def _trim_overlap(decoded: List[Dict[str, Any]],
 
 
 def build_recovered_words(key: str, window: float = 16.0,
-                          min_hole: float = 2.0) -> Dict[str, Any]:
-    """Return the shipped word stream with recovered hole words spliced in."""
+                          min_hole: float = 2.0,
+                          gate_rule: Optional[str] = None) -> Dict[str, Any]:
+    """Return the shipped word stream with recovered hole words spliced in.
+
+    ``gate_rule`` names a reference-free discriminator (see ``discriminate``). When
+    given, a hole is only filled if its decode passes that rule.
+    """
     from . import recovery as R
+    from . import discriminate as D
 
     spec = C.SUITE[key]
     words = C.read_json(spec.word_dir / "C_words.json")
@@ -102,7 +151,10 @@ def build_recovered_words(key: str, window: float = 16.0,
     a, sr = R._read_wav(str(spec.artifact_dir / "asr.16k.wav"))
     holes = [h for h in R.find_holes(key, min_hole) if h["has_audio"]]
 
+    rule = _RULE_FNS.get(gate_rule) if gate_rule else None
+
     inserted: List[Dict[str, Any]] = []
+    filled: List[Dict[str, Any]] = []
     for h in holes:
         mid = (h["start"] + h["end"]) / 2.0
         lo = max(0.0, mid - window / 2.0)
@@ -128,29 +180,61 @@ def build_recovered_words(key: str, window: float = 16.0,
         if not rw:
             continue
 
-        # space the recovered words across the hole itself, not the wider window,
-        # so they land where the speech actually is
+        if rule is not None:
+            decoded = [D._norm(w.get("word", "")) for w in rw if D._norm(w.get("word", ""))]
+            feats = D.features_for_hole(key, h, decoded, base)
+            if not rule(feats):
+                continue
+
+        filled.append(h)
+        # Place recovered words where the hole actually has energy, not uniformly
+        # across it: a hole often contains a pause followed by speech, and even
+        # spacing puts the words into the pause and assigns them to the wrong turn.
+        span_lo, span_hi = _energy_span(a, sr, h["start"], h["end"])
         n = len(rw)
-        span = max(0.2, h["dur"])
+        span = max(0.2, span_hi - span_lo)
         step = span / n
         for i, w in enumerate(rw):
             inserted.append({
                 "word": w.get("word", ""),
-                "start": round(h["start"] + i * step, 2),
-                "end": round(h["start"] + (i + 1) * step, 2),
+                "start": round(span_lo + i * step, 2),
+                "end": round(span_lo + (i + 1) * step, 2),
             })
 
     merged = sorted(base + inserted, key=lambda w: (w["start"], w["end"]))
     return {"words": merged, "n_base": len(base), "n_inserted": len(inserted),
-            "holes": holes, "window": window}
+            "holes": filled, "n_holes_total": len(holes), "window": window,
+            "gate_rule": gate_rule}
 
 
-def run_gate(key: str, window: float = 16.0, force: bool = False) -> Dict[str, Any]:
-    """Compare shipped segmentation against hole-recovered segmentation."""
+# Reference-free discriminator rules, named so a cached result can be traced back
+# to the exact rule that produced it.
+_RULE_FNS = {
+    "head_dup<0.5": lambda f: f["head_dup"] < 0.5,
+    "tail_dup<0.5": lambda f: f["tail_dup"] < 0.5,
+    "dup<0.5": lambda f: f["head_dup"] < 0.5 and f["tail_dup"] < 0.5,
+    "n_decoded>=5": lambda f: f["n_decoded"] >= 5,
+    "wps_lte3": lambda f: f["wps"] <= 3.0,
+    "wps_0.3to3": lambda f: 0.3 <= f["wps"] <= 3.0,
+    "wps_0.3to3_head": lambda f: 0.3 <= f["wps"] <= 3.0 and f["head_dup"] < 0.5,
+}
+
+
+def run_gate(key: str, window: float = 16.0, force: bool = False,
+             gate_rule: Optional[str] = None) -> Dict[str, Any]:
+    """Compare shipped segmentation against hole-recovered segmentation.
+
+    ``gate_rule`` selects a reference-free discriminator from ``discriminate`` so a
+    hole is only filled when its decode does not duplicate its neighbours. Each
+    rule gets its own cache file, so the naive "fill everything" result and the
+    gated results can be compared side by side rather than overwriting each other.
+    """
     from app.services.alignment import align_timestamps
 
     spec = C.SUITE[key]
-    out_path = spec.out_dir / "recovery_gate.json"
+    # rule names contain '<' and '>=', which Windows rejects in filenames
+    tag = (gate_rule or "all").replace("<", "lt").replace(">", "gt").replace("=", "eq")
+    out_path = spec.out_dir / f"recovery_gate_{tag}.json"
     if out_path.exists() and not force:
         cached = C.read_json(out_path)
         if cached.get("window") == window:
@@ -161,19 +245,21 @@ def run_gate(key: str, window: float = 16.0, force: bool = False) -> Dict[str, A
     base_words = C.read_json(spec.word_dir / "C_words.json")
     baseline = _score(spec, align_timestamps(base_words, turns))
 
-    rec = build_recovered_words(key, window=window)
+    rec = build_recovered_words(key, window=window, gate_rule=gate_rule)
     recovered = _score(spec, align_timestamps(rec["words"], turns))
 
     out = {
-        "key": key, "window": window,
+        "key": key, "window": window, "gate_rule": tag,
         "baseline": baseline, "recovered": recovered,
         "n_base_words": rec["n_base"], "n_inserted_words": rec["n_inserted"],
-        "n_holes": len(rec["holes"]),
+        "n_holes": rec.get("n_holes_total", len(rec["holes"])),
+        "n_holes_filled": len(rec["holes"]),
         "hole_seconds": round(sum(h["dur"] for h in rec["holes"]), 1),
         "d_der": round(recovered["der"] - baseline["der"], 4),
         "d_agree_word": round(recovered["agree_word"] - baseline["agree_word"], 2),
         "d_miss_s": round(recovered["miss_s"] - baseline["miss_s"], 2),
         "d_conf_s": round(recovered["conf_s"] - baseline["conf_s"], 2),
+        "d_wer": round(recovered["wer_norm"] - baseline["wer_norm"], 4),
     }
     C.write_json(out_path, out)
     return out
