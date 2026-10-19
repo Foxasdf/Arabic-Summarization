@@ -132,32 +132,39 @@ def candidate_engine_words(enabled: bool = True):
 # Every rule below is a documentary Levantine<->MSA orthography pair, applied
 # symmetrically to both sides so it cannot favour the hypothesis. It is not
 # tuned per file: the rule list is fixed and identical for every recording.
+# Rules must be *convergent*: both spellings of a pair have to land on the same
+# canonical form. A one-way rewrite is not enough and silently does nothing.
+# For example mapping ذ->د alone gives هدا for هذا while هاد stays هاد, so the
+# pair still disagrees. Sound shifts therefore standardise on one character.
 LEVANTINE_RULES: List[tuple[str, str]] = [
-    # 3rd-person masculine suffix -o/-u written with و in dialect vs ه in MSA
-    ("و$", "ه"),
-    # final -ih/-eh spelling of the same suffix (كتبته / كتبتو / كتبتة)
-    ("ة$", "ه"),
-    # interdental realisation: ت for ث (تلاتة/ثلاثة, كتير/كثير)
-    ("ث", "ت"),
-    # ذ realised as د (هذا/هدا, ذهب/دهب)
-    ("ذ", "د"),
-    # ق realised as glottal/كip in some dialects is deliberately NOT normalised:
-    # it changes the word, not just the spelling.
-    # demonstrative / relative clitics
-    (r"^هال", "ال"),
-    (r"^هذ", "هذ"),
+    # Whole-word / prefix rules come FIRST: once a character-level rule has
+    # rewritten the token, a later ^anchored rule would no longer match the form
+    # it was written for. (This ordering bug is why هذا did not converge on
+    # هاد: ذ->د turned it into هدا before ^هذا$ was ever tried.)
+    # Both spellings are listed so the rule converges whichever appears.
+    (r"^(?:هذا|هدا)$", "هاد"),
+    (r"^(?:هذه|هده)$", "هادي"),
     (r"^يلي$", "اللي"),
     (r"^انو$", "انه"),
     (r"^انو", "انه"),
-    (r"^هو$", "هو"),
+    # هالقمة (dialect demonstrative + article) vs اللقمه (MSA)
+    (r"^هال", "ال"),
+    (r"^هب", "ب"),
+    # 3rd-person masculine suffix -o/-u (و) vs MSA ه -- converge both on ه
+    (r"و$", "ه"),
+    # final -ih/-eh (ة) vs ه -- converge both on ه
+    (r"ة$", "ه"),
+    # interdental realisation, converged on the dialect symbol
+    #   كتير/كثير -> كتير ; تلاتة/ثلاثه -> تلاته
+    ("ث", "ت"),
+    #   هذا/هاد/هدا -> هاد ; ذهب/دهب -> دهب
+    ("ذ", "د"),
     # alef maqsura / ya spelling
     ("ى$", "ي"),
     # hamza seats are frequently dropped in dialect spelling
     ("أ", "ا"),
     ("إ", "ا"),
     ("آ", "ا"),
-    # ta marbuta vs ha at word end already handled above; also taa marbuta
-    # appearing as ه medially (مدرسه/مدرسة handled by ة->ه above)
 ]
 
 

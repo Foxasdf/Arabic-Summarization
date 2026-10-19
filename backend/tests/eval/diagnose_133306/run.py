@@ -371,6 +371,21 @@ def stage_candidates() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# stage: e2e (candidates through the real pipeline, not cached slices)
+# ---------------------------------------------------------------------------
+def stage_e2e(force: bool = True) -> dict:
+    from . import e2e_candidates as E
+
+    C.ensure_dirs()
+    _log("end-to-end candidate runs (baseline + patches, real pipeline)...")
+    out = E.run_e2e(C.ACTIVE.key, ["credit_regex", "engine_words"], force=force)
+    for label, v in out["runs"].items():
+        _log(f"  {label:14s} segs={v['n_segments']:3d} DER={v['der']:.4f} "
+             f"WER={v['wer_norm']:.4f} words={v['hyp_words']:3d} agree_w={v['agree_word']:.1f}")
+    return out
+
+
+# ---------------------------------------------------------------------------
 # stage: suite (cross-file tables, macro average, joint gates)
 # ---------------------------------------------------------------------------
 def stage_suite() -> dict:
@@ -394,12 +409,47 @@ def stage_suite() -> dict:
     gates = []
     notes = []
 
+    # --- END-TO-END gates (authoritative: real pipeline, not cached text) ---
+    e2e: Dict[str, Dict[str, Any]] = {}
+    for k in keys:
+        p = C.SUITE[k].out_dir / "e2e.json"
+        if p.exists():
+            e2e[k] = C.read_json(p).get("runs") or {}
+
+    def _e2e_gate(label: str, cnd: str, metric: str, higher: bool,
+                  min_gain: Optional[float] = None):
+        b = {k: (e2e[k].get("baseline") or {}).get(metric) for k in keys if k in e2e}
+        a = {k: (e2e[k].get(cnd) or {}).get(metric) for k in keys if k in e2e}
+        if not b or not a or any(v is None for v in b.values()) or any(v is None for v in a.values()):
+            return None
+        return SR.two_file_gate(label, b, a, metric, higher_is_better=higher, min_gain=min_gain)
+
+    for cnd, lbl in (("credit_regex", "credit regex — end-to-end"),
+                     ("engine_words", "engine word list — end-to-end")):
+        if all(cnd in (e2e.get(k) or {}) for k in keys):
+            g1 = _e2e_gate(f"{lbl}: WER", cnd, "wer_norm", False)
+            g2 = _e2e_gate(f"{lbl}: DER", cnd, "der", False, min_gain=0.0001)
+            g3 = _e2e_gate(f"{lbl}: word agreement", cnd, "agree_word", True)
+            for g in (g1, g2, g3):
+                if g:
+                    gates.append(g)
+            if g1 and g2 and g3:
+                notes.append(
+                    f"**{lbl}** — WER {g1['status']}; DER "
+                    + ", ".join(f"`{pf['file']}` {pf['before']} → {pf['after']} ({pf['delta']:+.4f})"
+                                for pf in g2["per_file"])
+                    + "; word agreement "
+                    + ", ".join(f"`{pf['file']}` {pf['before']:.1f} → {pf['after']:.1f}%"
+                                for pf in g3["per_file"])
+                    + ". Measured through the real pipeline, so these are the authoritative "
+                      "verdicts; the text-replay gates below can only approximate them.")
+
     # --- Arm C: does Whisper word timing beat production on BOTH files? ---
     if all((r["arms"].get("C_whisper_timing") or {}).get("der") is not None for r in records):
         der_b = {r["key"]: r["production"]["der"] for r in records}
         der_a = {r["key"]: r["arms"]["C_whisper_timing"]["der"] for r in records}
         gates.append(SR.two_file_gate("Arm C — DER", der_b, der_a, "DER (ref_tiles)",
-                                      higher_is_better=False, tol=SR.TOL_DER))
+                                      higher_is_better=False))
         w_b = {r["key"]: r["production"]["agree_word"] for r in records}
         w_a = {r["key"]: r["arms"]["C_whisper_timing"]["agree_word"] for r in records}
         gates.append(SR.two_file_gate("Arm C — word agreement", w_b, w_a,
@@ -436,7 +486,7 @@ def stage_suite() -> dict:
         before = {k: cand[k]["fuzzy_seam"]["baseline"]["der"] for k in keys}
         after = {k: cand[k]["fuzzy_seam"]["candidate_metrics"]["der"] for k in keys}
         g = SR.two_file_gate("3. fuzzy seam dedupe", before, after, "DER (ref_tiles)",
-                             higher_is_better=False, tol=SR.TOL_DER, min_gain=0.0001)
+                             higher_is_better=False, min_gain=0.0001)
         gates.append(g)
         ab = {k: cand[k]["fuzzy_seam"]["baseline"]["agree_word"] for k in keys}
         aa = {k: cand[k]["fuzzy_seam"]["candidate_metrics"]["agree_word"] for k in keys}
@@ -451,7 +501,7 @@ def stage_suite() -> dict:
         after = {k: cand[k]["vad_word_timing"]["candidate_metrics"]["der"] for k in keys}
         gates.append(SR.two_file_gate("4. VAD-aware word timing", before, after,
                                       "DER (ref_tiles)", higher_is_better=False,
-                                      tol=SR.TOL_DER, min_gain=0.0001))
+                                      min_gain=0.0001))
         ab = {k: cand[k]["vad_word_timing"]["baseline"]["agree_word"] for k in keys}
         aa = {k: cand[k]["vad_word_timing"]["candidate_metrics"]["agree_word"] for k in keys}
         gates.append(SR.two_file_gate("4b. VAD-aware word timing — word agreement", ab, aa,
@@ -463,7 +513,7 @@ def stage_suite() -> dict:
         after = {k: cand[k]["snap_words"]["candidate_metrics"]["der"] for k in keys}
         gates.append(SR.two_file_gate("5. Pyannote boundary snapping", before, after,
                                       "DER (ref_tiles)", higher_is_better=False,
-                                      tol=SR.TOL_DER, min_gain=0.0001))
+                                      min_gain=0.0001))
 
     out = {
         "files": records,
@@ -474,7 +524,7 @@ def stage_suite() -> dict:
     }
     C.set_active(keys[0])
     C.write_json(C.OUT_ROOT / "suite" / "suite.json", out)
-    md = SR.render_suite(records, gates, notes, rec_cand=cand)
+    md = SR.render_suite(records, gates, notes, rec_cand=cand, rec_e2e=e2e)
     p = C.OUT_ROOT / "suite" / "suite.md"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(md, encoding="utf-8")
@@ -487,8 +537,8 @@ def stage_suite() -> dict:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--stage", default="all",
-                    choices=["verify", "repro", "arms", "candidates", "score", "report",
-                             "suite", "all"])
+                    choices=["verify", "repro", "arms", "candidates", "e2e", "score",
+                             "report", "suite", "all"])
     ap.add_argument("--file", default=None,
                     help="suite member key (default: all members, primary first)")
     ap.add_argument("--verbose", action="store_true")
@@ -509,6 +559,8 @@ def main(argv=None) -> int:
             stage_arms()
         if args.stage in ("candidates", "all"):
             stage_candidates()
+        if args.stage in ("e2e", "all"):
+            stage_e2e()
         if args.stage in ("score", "report", "all"):
             m = stage_score_and_report()
             _log(f"metrics written to {C.OUT_DIR / 'metrics.json'}")
