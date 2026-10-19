@@ -43,6 +43,29 @@ def _sync_init_db():
             if k not in existing:  # lightweight migration for older databases
                 conn.execute(f"ALTER TABLE meetings ADD COLUMN {k} {v.split(' DEFAULT')[0]}")
                 logger.info(f"DB migration: added column {k}")
+
+        # Data migration: consolidate consecutive same-speaker segments for existing stored meetings
+        try:
+            from .alignment import merge_consecutive_speaker_segments
+            rows = conn.execute("SELECT id, transcript_json FROM meetings WHERE transcript_json IS NOT NULL").fetchall()
+            for r in rows:
+                m_id = r["id"]
+                raw_t = r["transcript_json"]
+                if raw_t:
+                    try:
+                        segs = json.loads(raw_t)
+                        if isinstance(segs, list) and segs:
+                            consolidated = merge_consecutive_speaker_segments(segs)
+                            if len(consolidated) != len(segs):
+                                conn.execute(
+                                    "UPDATE meetings SET transcript_json = ? WHERE id = ?",
+                                     (json.dumps(consolidated, ensure_ascii=False), m_id)
+                                )
+                                logger.info(f"DB migration: consolidated transcript for meeting {m_id} ({len(segs)} -> {len(consolidated)} segments)")
+                    except Exception as ex:
+                        logger.debug(f"Could not migrate meeting {m_id}: {ex}")
+        except Exception as e:
+            logger.debug(f"DB migration error during segment consolidation: {e}")
     conn.close()
 
 
@@ -53,12 +76,26 @@ def _row_to_dict(row) -> Dict:
             res[f] = json.loads(res[f]) if res.get(f) else default
         except (TypeError, json.JSONDecodeError):
             res[f] = default
+
+    if isinstance(res.get("transcript_json"), list):
+        try:
+            from .alignment import merge_consecutive_speaker_segments
+            res["transcript_json"] = merge_consecutive_speaker_segments(res["transcript_json"])
+        except Exception:
+            pass
+
     return res
 
 
 def _sync_save_meeting(data: dict) -> str:
     """Upsert: only provided (non-None) fields are written."""
     fields = {k: data[k] for k in _COLUMNS if k in data and k != "upload_time" and data[k] is not None}
+    if "transcript_json" in fields and isinstance(fields["transcript_json"], list):
+        try:
+            from .alignment import merge_consecutive_speaker_segments
+            fields["transcript_json"] = merge_consecutive_speaker_segments(fields["transcript_json"])
+        except Exception:
+            pass
     for f in _JSON_FIELDS:
         if f in fields:
             fields[f] = json.dumps(fields[f], ensure_ascii=False)

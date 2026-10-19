@@ -719,5 +719,8 @@ class BaseASREngine(BaseModelEngine):
                 except Exception as ex:
                     logger.debug(f"Error unloading extra ASR engine: {ex}")
 
+        from ...services.alignment import merge_consecutive_speaker_segments
+        segments = merge_consecutive_speaker_segments(segments)
+
         logger.info(f"Speaker-aware ASR complete: {len(windows)} windows -> {len(segments)} segments.")
         return segments

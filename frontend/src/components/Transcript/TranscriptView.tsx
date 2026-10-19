@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { motion } from 'framer-motion';
 import { Download, Sparkles, Loader2, Users } from 'lucide-react';
 import { TranscriptSegment } from '../../types';
@@ -27,6 +27,32 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [localSpeakers, setLocalSpeakers] = useState<Record<string, string>>(speakers);
+
+  const displaySegments = useMemo(() => {
+    if (!segments || segments.length === 0) return [];
+    const punctuation = ['.', '،', '؟', '!', '؛', ',', '?', ':', '…'];
+    const merged: TranscriptSegment[] = [];
+
+    for (const seg of segments) {
+      const text = (seg.text || '').trim();
+      if (!text) continue;
+      const last = merged[merged.length - 1];
+      if (last && last.speaker === seg.speaker) {
+        const gap = seg.start - last.end;
+        last.end = Math.max(last.end, seg.end);
+        const lastText = last.text.trim();
+        const hasPunctuation = punctuation.some(p => lastText.endsWith(p));
+        if (gap > 2.0 && !hasPunctuation) {
+          last.text = `${lastText}، ${text}`;
+        } else {
+          last.text = `${lastText} ${text}`;
+        }
+      } else {
+        merged.push({ ...seg, text });
+      }
+    }
+    return merged;
+  }, [segments]);
 
   useEffect(() => {
     setLocalSpeakers(speakers || {});
@@ -74,7 +100,7 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
   };
 
   const handleDownload = () => {
-    const text = segments
+    const text = displaySegments
       .map(s => `[${formatTime(s.start)}] ${getSpeakerDisplayName(s.speaker)}: ${s.text}`)
       .join('\n\n');
     const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
@@ -95,7 +121,7 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
           <div className="flex items-center gap-3">
             <h3 className="font-bold text-slate-800 text-lg">النص الكامل</h3>
             <span className="text-xs text-slate-500 bg-slate-200/60 px-2 py-0.5 rounded-full font-medium">
-              {segments.length} مقطع
+              {displaySegments.length} مقطع
             </span>
           </div>
           
@@ -140,7 +166,7 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
         )}
 
         <div className="flex-1 overflow-y-auto p-6 space-y-6 scroll-smooth">
-          {segments.map((segment, index) => (
+          {displaySegments.map((segment, index) => (
             <motion.div 
               key={index}
               initial={{ opacity: 0, y: 10 }}
@@ -175,7 +201,7 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
       <ManageSpeakersModal
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
-        segments={segments}
+        segments={displaySegments}
         speakers={localSpeakers}
         onSave={handleModalSave}
       />

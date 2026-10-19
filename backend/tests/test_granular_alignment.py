@@ -158,6 +158,71 @@ class TestGranularAlignment(unittest.TestCase):
         self.assertEqual(seg_q2[0]["speaker"], "SPEAKER_00")
         self.assertIn("مشان شو", seg_q2[0]["text"])
 
+    def test_consecutive_same_speaker_consolidation(self):
+        from app.services.alignment import merge_consecutive_speaker_segments
+        raw_segments = [
+            {"speaker": "SPEAKER_02", "start": 13.0, "end": 14.5, "text": "سؤال"},
+            {"speaker": "SPEAKER_02", "start": 15.0, "end": 18.2, "text": "بس انه انت مبين عليك مراحل الاكل"},
+            {"speaker": "SPEAKER_01", "start": 19.0, "end": 20.0, "text": "صعبه صح"},
+            {"speaker": "SPEAKER_02", "start": 20.5, "end": 22.0, "text": "ومطبات صعبه يعني"},
+            {"speaker": "SPEAKER_01", "start": 36.0, "end": 40.0, "text": "بلشت هيك احس حالي بلشت"},
+            {"speaker": "SPEAKER_01", "start": 42.5, "end": 46.0, "text": "مثلا كول اللقمه هي"},
+        ]
+        merged = merge_consecutive_speaker_segments(raw_segments)
+        
+        # Verify count: 6 raw segments -> 4 consolidated segments (no consecutive same speaker)
+        self.assertEqual(len(merged), 4)
+
+        # Segment 0: SPEAKER_02 (13.0 - 18.2)
+        self.assertEqual(merged[0]["speaker"], "SPEAKER_02")
+        self.assertEqual(merged[0]["start"], 13.0)
+        self.assertEqual(merged[0]["end"], 18.2)
+        self.assertIn("سؤال", merged[0]["text"])
+        self.assertIn("مراحل الاكل", merged[0]["text"])
+
+        # Segment 1: SPEAKER_01
+        self.assertEqual(merged[1]["speaker"], "SPEAKER_01")
+        self.assertEqual(merged[1]["text"], "صعبه صح")
+
+        # Segment 2: SPEAKER_02
+        self.assertEqual(merged[2]["speaker"], "SPEAKER_02")
+        self.assertEqual(merged[2]["text"], "ومطبات صعبه يعني")
+
+        # Segment 3: SPEAKER_01 (36.0 - 46.0) with gap > 2.0s (42.5 - 40.0 = 2.5s)
+        self.assertEqual(merged[3]["speaker"], "SPEAKER_01")
+        self.assertEqual(merged[3]["start"], 36.0)
+        self.assertEqual(merged[3]["end"], 46.0)
+        self.assertEqual(merged[3]["text"], "بلشت هيك احس حالي بلشت، مثلا كول اللقمه هي")
+
+    def test_gap_punctuation_formatting(self):
+        from app.services.alignment import merge_consecutive_speaker_segments
+        
+        # Case A: Gap > 2.0s without punctuation -> inserts Arabic comma '، '
+        segs_a = [
+            {"speaker": "SPEAKER_01", "start": 0.0, "end": 2.0, "text": "الجملة الأولى"},
+            {"speaker": "SPEAKER_01", "start": 4.5, "end": 6.0, "text": "الجملة الثانية"},
+        ]
+        res_a = merge_consecutive_speaker_segments(segs_a)
+        self.assertEqual(len(res_a), 1)
+        self.assertEqual(res_a[0]["text"], "الجملة الأولى، الجملة الثانية")
+
+        # Case B: Gap > 2.0s with punctuation already present -> does not duplicate comma
+        segs_b = [
+            {"speaker": "SPEAKER_01", "start": 0.0, "end": 2.0, "text": "هل تفهم؟"},
+            {"speaker": "SPEAKER_01", "start": 4.5, "end": 6.0, "text": "نعم بالتأكيد."},
+        ]
+        res_b = merge_consecutive_speaker_segments(segs_b)
+        self.assertEqual(len(res_b), 1)
+        self.assertEqual(res_b[0]["text"], "هل تفهم؟ نعم بالتأكيد.")
+
+        # Case C: Gap <= 2.0s -> separates with standard space
+        segs_c = [
+            {"speaker": "SPEAKER_01", "start": 0.0, "end": 2.0, "text": "مرحباً"},
+            {"speaker": "SPEAKER_01", "start": 3.0, "end": 4.0, "text": "بكم"},
+        ]
+        res_c = merge_consecutive_speaker_segments(segs_c)
+        self.assertEqual(len(res_c), 1)
+        self.assertEqual(res_c[0]["text"], "مرحباً بكم")
 
 
 if __name__ == "__main__":

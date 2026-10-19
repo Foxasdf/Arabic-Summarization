@@ -167,6 +167,47 @@ def smooth_speaker_assignments(
     return smoothed
 
 
+def merge_consecutive_speaker_segments(segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Merge consecutive segments belonging to the same speaker into a single segment.
+    Ensures that a single speaker never appears in consecutive back-to-back fields.
+    If the gap between consecutive segments > 2.0s, separates with an Arabic comma '، '
+    (unless the previous text already ends with punctuation) for enhanced readability.
+    """
+    if not segments:
+        return []
+
+    merged: List[Dict[str, Any]] = []
+    punctuation = (".", "،", "؟", "!", "؛", ",", "?", ":", "…")
+
+    for seg in segments:
+        txt = (seg.get("text") or "").strip()
+        if not txt:
+            continue
+        spk = seg.get("speaker") or "SPEAKER_00"
+        start = round(float(seg.get("start", 0.0)), 2)
+        end = round(float(seg.get("end", 0.0)), 2)
+
+        if merged and merged[-1].get("speaker") == spk:
+            prev_end = float(merged[-1].get("end", 0.0))
+            gap = start - prev_end
+            merged[-1]["end"] = max(prev_end, end)
+            prev_txt = merged[-1]["text"].rstrip()
+            if gap > 2.0 and not prev_txt.endswith(punctuation):
+                merged[-1]["text"] = f"{prev_txt}، {txt}"
+            else:
+                merged[-1]["text"] = f"{prev_txt} {txt}"
+        else:
+            merged.append({
+                "speaker": spk,
+                "start": start,
+                "end": end,
+                "text": txt,
+            })
+
+    return merged
+
+
 def build_utterances_from_words(
     words: List[Dict[str, Any]],
     max_pause_sec: float = 1.0,
@@ -180,6 +221,8 @@ def build_utterances_from_words(
         turn-taking; 2.0s merged distinct conversational moves).
     (c) Maximum utterance length reached (30 words keeps subtitles readable
         and matches reference granularity ~8 words/segment).
+    Finally consolidates any consecutive segments of the same speaker so no
+    speaker appears in two consecutive fields.
     """
     if not words:
         return []
@@ -220,7 +263,7 @@ def build_utterances_from_words(
                 "text": txt,
             })
 
-    return utterances
+    return merge_consecutive_speaker_segments(utterances)
 
 
 def align_timestamps(asr_words: Any, diarization_segments: List[Dict]) -> List[Dict]:
@@ -266,7 +309,8 @@ def align_timestamps(asr_words: Any, diarization_segments: List[Dict]) -> List[D
     # Phase 4: Word-Level Speaker Assignment, Smoothing, and Utterance Construction
     assigned = assign_words_to_speakers(deduped_words, turns)
     smoothed = smooth_speaker_assignments(assigned, turns)
-    segments = build_utterances_from_words(smoothed)
+    raw_segments = build_utterances_from_words(smoothed)
+    segments = merge_consecutive_speaker_segments(raw_segments)
 
     logger.info(
         f"Alignment complete: {len(deduped_words)} words -> {len(segments)} speaker segments."
