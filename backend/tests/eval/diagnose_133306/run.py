@@ -525,6 +525,31 @@ def stage_suite() -> dict:
     except Exception as e:
         _log(f"frontier unavailable: {e}")
 
+    # --- hole recovery (speech the ASR never emitted) ----------------------
+    recov: Dict[str, Dict[str, Any]] = {}
+    for k in keys:
+        try:
+            from . import recovery as R
+            from . import recovery_gate as RG
+
+            sweep_path = C.SUITE[k].out_dir / "recovery.json"
+            gate_path = C.SUITE[k].out_dir / "recovery_gate.json"
+            entry: Dict[str, Any] = {}
+            if sweep_path.exists():
+                entry["sweep"] = R.summarize(C.read_json(sweep_path))
+            if gate_path.exists():
+                entry["gate"] = C.read_json(gate_path)
+            if entry:
+                recov[k] = entry
+        except Exception as e:
+            _log(f"recovery: {k} unavailable ({e})")
+    if recov:
+        for k, v in recov.items():
+            g = v.get("gate") or {}
+            if g:
+                _log(f"recovery {k}: DER {g['baseline']['der']} -> {g['recovered']['der']} "
+                     f"({g['d_der']:+.4f}), WER {g['baseline']['wer_norm']} -> {g['recovered']['wer_norm']}")
+
     out = {
         "files": records,
         "macro": SR.macro_average(records),
@@ -532,10 +557,12 @@ def stage_suite() -> dict:
         "notes": notes,
         "candidates": cand,
         "frontier": fr,
+        "recovery": recov,
     }
     C.set_active(keys[0])
     C.write_json(C.OUT_ROOT / "suite" / "suite.json", out)
-    md = SR.render_suite(records, gates, notes, rec_cand=cand, rec_e2e=e2e, frontier=fr)
+    md = SR.render_suite(records, gates, notes, rec_cand=cand, rec_e2e=e2e,
+                         frontier=fr, recovery=recov)
     p = C.OUT_ROOT / "suite" / "suite.md"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(md, encoding="utf-8")

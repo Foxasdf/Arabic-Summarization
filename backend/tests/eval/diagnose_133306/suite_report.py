@@ -242,9 +242,11 @@ def render_suite(records: List[Dict[str, Any]], gates: List[Dict[str, Any]],
                  candidate_notes: List[str],
                  rec_cand: Optional[Dict[str, Dict[str, Any]]] = None,
                  rec_e2e: Optional[Dict[str, Dict[str, Any]]] = None,
-                 frontier: Optional[Dict[str, Any]] = None) -> str:
+                 frontier: Optional[Dict[str, Any]] = None,
+                 recovery: Optional[Dict[str, Dict[str, Any]]] = None) -> str:
     rec_cand = rec_cand or {}
     rec_e2e = rec_e2e or {}
+    recovery = recovery or {}
     macro = macro_average(records)
     L: List[str] = []
     L.append("# Two-file suite: 133306 (primary) vs nlp_5min (validation)\n")
@@ -468,6 +470,58 @@ def render_suite(records: List[Dict[str, Any]], gates: List[Dict[str, Any]],
              "`engine_words` and `arm_c` differ only in the timing attached. The conclusion (do not ship it "
              "alone) stands, but the reason is different — it is not a missing follow-up, it is that the "
              "acoustic-timing configuration already supersedes it.\n")
+
+    L.append("## Hole recovery: speech the ASR never emitted\n")
+    if recovery:
+        L.append("The measurement that started this: on `133306`, the span **78.5–87.3 s** produces **zero "
+                 "words**. The audio there is not quiet — it peaks at −17 dB, louder than the surrounding "
+                 "speech — Pyannote hears speech in it, and the reference transcript contains "
+                 "`لما كنت صف سابع تقريبا كان وزني شي 90` inside it. It is not a 28 s truncation either: on "
+                 "`nlp_5min` slices up to 29.65 s transcribe at normal word rates, and decoding that same "
+                 "region as an 11.8 s window with the shipped engine returns "
+                 "`لما كنت صف سابع تقريبا كان وزني شي 90` **verbatim**. Same samples, same model; only the "
+                 "window composition differs. So the words are recoverable — a long single-shot decode was "
+                 "dropping them.\n")
+        L.append("A candidate that re-decodes any word-stream gap containing audio, with a short window, "
+                 "recovers speech at every window length tried — so it is not a tuned constant:\n")
+        L.append("| file | holes (with audio) | hole seconds | recovered at 4 s | 6 s | 8 s | 10 s | 12 s | 16 s |")
+        L.append("|---|---:|---:|---|---|---|---|---|---|")
+        for r in records:
+            rv = recovery.get(r["key"]) or {}
+            sw = rv.get("sweep") or {}
+            by = {str(int(x["len"])): x for x in (sw.get("by_len") or [])}
+            cells = " | ".join(f"{by[k]['holes_recovered']}/{by[k]['n_holes']}"
+                               for k in ("4", "6", "8", "10", "12", "16") if k in by)
+            L.append(f"| `{r['key']}` | {sw.get('holes', '—')} | {sw.get('hole_seconds', '—')} | {cells} |")
+        L.append("")
+        L.append("But recovering the words and *scoring* them are different questions, and the answer to "
+                 "the second is negative:\n")
+        L.append("| file | DER | missing speech (s) | word agreement | WER |")
+        L.append("|---|---|---|---|---|")
+        for r in records:
+            g = (recovery.get(r["key"]) or {}).get("gate") or {}
+            b, a = g.get("baseline") or {}, g.get("recovered") or {}
+            if not b or not a:
+                continue
+            L.append(f"| `{r['key']}` | {_f(b.get('der'))} → {_f(a.get('der'))} ({g['d_der']:+.4f}) | "
+                     f"{_f(b.get('miss_s'), 1)} → {_f(a.get('miss_s'), 1)} | "
+                     f"{_f(b.get('agree_word'), 1)}% → {_f(a.get('agree_word'), 1)}% | "
+                     f"{_f(b.get('wer_norm'))} → {_f(a.get('wer_norm'))} |")
+        L.append("")
+        L.append("DER improves on both files and missing speech falls sharply, because the inserted words "
+                 "give the scorer speech to attribute where before there was none. **WER gets worse on both**, "
+                 "and that is the honest verdict: of 90 words inserted on `133306`, only 67% appear in the "
+                 "reference vocabulary at all, and many of the rest are re-decodings of speech that was "
+                 "already transcribed — the wider context window reaches past the hole. The 8.8 s case "
+                 "recovered its line verbatim, but 2–3 s gaps are usually the speaker pausing (the reference "
+                 "marks them with `...`), and re-decoding a pause yields either silence or neighbouring "
+                 "speech, not new content.\n")
+        L.append("**Verdict: not adopted.** The mechanism is real and the failure it targets is real, but "
+                 "inserting words with synthetic timings into gaps that are mostly pauses costs more in "
+                 "insertion errors than it recovers. Making this a win needs a way to tell a genuine "
+                 "dropped-utterance from a pause before inserting — which the current signals do not "
+                 "provide, since both are loud, unbounded in Pyannote, and wordless.\n")
+    L.append("")
 
     L.append("## Error attribution per file\n")
     L.append("| cause | 133306 | nlp_5min |")
