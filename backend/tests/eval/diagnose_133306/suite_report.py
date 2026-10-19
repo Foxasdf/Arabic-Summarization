@@ -241,7 +241,8 @@ def _f(v, nd=4):
 def render_suite(records: List[Dict[str, Any]], gates: List[Dict[str, Any]],
                  candidate_notes: List[str],
                  rec_cand: Optional[Dict[str, Dict[str, Any]]] = None,
-                 rec_e2e: Optional[Dict[str, Dict[str, Any]]] = None) -> str:
+                 rec_e2e: Optional[Dict[str, Dict[str, Any]]] = None,
+                 frontier: Optional[Dict[str, Any]] = None) -> str:
     rec_cand = rec_cand or {}
     rec_e2e = rec_e2e or {}
     macro = macro_average(records)
@@ -371,9 +372,55 @@ def render_suite(records: List[Dict[str, Any]], gates: List[Dict[str, Any]],
              "are strictly sequential; concurrent requests competing for the same GPU and VRAM were not "
              "tested and would need a queue or memory cap before multi-user exposure.\n")
 
+    L.append("### The real design space: word list × word timing\n")
+    L.append("The two \"structural fixes\" are not two independent levers. The Cohere engine's own word list "
+             "and Arm C's aligned list contain the **same token sequence** on both files "
+             "(794 == 794, 668 == 668; zero non-equal regions under a sequence alignment), because Arm C was "
+             "produced by aligning onto that same transcript. So the honest design space is 2x2 — what you do "
+             "about the word list, and what you do about the timing:\n")
+    L.append("| words | fabricated timing | acoustic timing (Arm C) |")
+    L.append("|---|---|---|")
+    L.append("| discarded by text path | `production` | `arm_c` |")
+    L.append("| preserved | `engine_words` | `combined` (= `arm_c`, since the sequences coincide) |")
+    L.append("")
+    if frontier:
+        L.append("Macro-averaged across both files:\n")
+        L.append("| cell | DER | word agreement | duration agreement | WER |")
+        L.append("|---|---:|---:|---:|---:|")
+        for cname, v in frontier["macro"].items():
+            L.append(f"| `{cname}` | {_f(v['der'])} | {_f(v['agree_word'], 2)}% | "
+                     f"{_f(v['agree_duration'], 2)}% | {_f(v['wer_norm'])} |")
+        L.append("")
+        best_der = frontier["best_der_cell"]
+        best_agree = frontier["best_agreement_cell"]
+        L.append(f"**The two metrics disagree about the best configuration**: DER prefers `{best_der}`, "
+                 f"speaker agreement prefers `{best_agree}`. This is not a tie to be broken by preference — "
+                 f"it is a real trade between different failure modes, and it belongs in the report rather "
+                 f"than behind a single PASS/FAIL.\n")
+        L.append("| file | production | engine_words | arm_c |")
+        L.append("|---|---|---|---|")
+        for k, cells in frontier["per_file"].items():
+            def cell(c):
+                v = cells.get(c)
+                if not v:
+                    return "—"
+                return (f"DER {_f(v['der'])}<br>conf {_f(v['conf_s'], 1)}s "
+                        f"miss {_f(v['miss_s'], 1)}s<br>agree {_f(v['agree_word'], 1)}%")
+            L.append(f"| `{k}` | {cell('production')} | {cell('engine_words')} | {cell('arm_c')} |")
+        L.append("")
+        L.append("Reading it: `engine_words` wins DER by **buying back missing speech** — it detects words the "
+                 "text path was dropping (133306: miss 35.1 s → 7.5 s) but attaches the fabricated uniform "
+                 "timing to them, so confusion climbs. `arm_c` uses **real acoustic timing**, which lowers "
+                 "confusion (133306: 68.6 s → 61.3 s) and raises agreement, but leaves the missing words "
+                 "missing, so DER improves less or not at all.")
+    L.append("")
     L.append("### Why each DER change happened: confusion vs missing speech\n")
     L.append("A DER delta alone cannot tell you which side moved, and different levers move *opposite* "
              "sides. Both are in seconds of wrongly-attributed / uncovered speech.\n")
+    L.append("Only levers that the 2x2 above does **not** already cover are listed here. The engine-word "
+             "variants are omitted because they are that table; the credit regex is included because it "
+             "changes neither the word list nor the timing. One numeric source per comparison, rather than "
+             "two runs of the same thing that differ by pipeline noise.\n")
     L.append("| file | lever | confusion (s) | missing speech (s) | DER |")
     L.append("|---|---|---:|---:|---:|")
     for r in records:
@@ -387,35 +434,40 @@ def render_suite(records: List[Dict[str, Any]], gates: List[Dict[str, Any]],
                      f"{_f(b.get('miss_s'), 1)} → {_f(a.get('miss_s'), 1)} | "
                      f"{_f(b.get('der'))} → {_f(a.get('der'))} |")
     for r in records:
+        # credit regex is the one e2e cell not represented in the 2x2 (the 2x2
+        # varies word list and timing; the regex varies neither), so it belongs here.
         e2 = (rec_e2e.get(r["key"]) or {})
         b = e2.get("baseline") or {}
-        for ckey, label in (("credit_regex", "credit regex"),
-                            ("engine_words", "engine word list")):
-            a = e2.get(ckey) or {}
-            if not b or not a:
-                continue
-            L.append(f"| `{r['key']}` | {label} *(e2e)* | "
+        a = e2.get("credit_regex") or {}
+        if b and a:
+            L.append(f"| `{r['key']}` | credit regex *(e2e)* | "
                      f"{_f(b.get('conf_s'), 1)} → {_f(a.get('conf_s'), 1)} | "
                      f"{_f(b.get('miss_s'), 1)} → {_f(a.get('miss_s'), 1)} | "
                      f"{_f(b.get('der'))} → {_f(a.get('der'))} |")
     L.append("")
-    L.append("This table is the key to reading the gates. The **engine word list** fix on `133306` swings "
-             "missed speech down sharply (29.4 s → 7.5 s) while confusion rises (68.2 s → 86.2 s): DER "
-             "improves because the net of the two is positive, but speaker *agreement* — which is "
-             "confusion alone — falls. That is a genuine trade, not a noisy measurement, and it is why "
-             "the same candidate passes the DER gate and fails the agreement gate.\n")
+    L.append("Note the two directions are not the same kind of trade. The credit regex moves **both** sides "
+             "favourably on `133306` (confusion 68.2 s → 63.2 s, and its recovered speech more than offsets "
+             "the rise in uncovered time since total DER falls) because it restores speech the old rule "
+             "deleted outright. The engine-word change, by contrast, moves the two sides in **opposite** "
+             "directions — that is the trade described in the 2x2 above.\n")
     L.append("The two fixes are therefore **not** interchangeable, and the data separates them cleanly:\n")
     L.append("| fix | net effect | recommendation |")
     L.append("|---|---|---|")
     L.append("| credit regex | improves DER on `133306` (+0.0236) with no measurable cost on `nlp_5min`; "
              "raises word agreement on `133306` (87.3 → 88.8%) and costs 0.3 pts on `nlp_5min`, well "
              "inside that file's ±1.0 pt band | **adopt** — it only ever restores speech the old rule "
-             "wrongly deleted |")
-    L.append("| engine word list | improves DER on both files (−0.0103, −0.0135) but shifts the error from "
-             "missing speech into speaker confusion, costing 3.9 pts of word agreement on `133306` | "
-             "**do not adopt as-is** — it is a real capability fix but needs the alignment stage revisited "
-             "before it is a net win |")
+             "wrongly deleted, and it is the one change that improves DER *and* agreement |")
+    L.append("| engine word list | improves DER on both files but attaches fabricated uniform timing to the "
+             "recovered words, converting missing speech into speaker confusion | **do not adopt alone** — "
+             "see the 2x2 above: the words are worth keeping, but only alongside acoustic timing, and since "
+             "Arm C already re-times the same sequence the practical choice is `arm_c`, not `engine_words` |")
     L.append("")
+    L.append("> **Correction to the previous round.** That round reported the `engine_words` result as a "
+             "capability fix that needs \"the alignment stage revisited\", on the assumption it was "
+             "independent of Arm C. It is not: the engine list and the Arm C list are the same sequence, so "
+             "`engine_words` and `arm_c` differ only in the timing attached. The conclusion (do not ship it "
+             "alone) stands, but the reason is different — it is not a missing follow-up, it is that the "
+             "acoustic-timing configuration already supersedes it.\n")
 
     L.append("## Error attribution per file\n")
     L.append("| cause | 133306 | nlp_5min |")

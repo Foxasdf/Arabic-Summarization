@@ -515,16 +515,27 @@ def stage_suite() -> dict:
                                       "DER (ref_tiles)", higher_is_better=False,
                                       min_gain=0.0001))
 
+    # --- design-space frontier (word list x timing) ------------------------
+    fr = None
+    try:
+        from . import combined as CB
+        fr = CB.frontier(keys)
+        _log(f"frontier: best DER = {fr['best_der_cell']}, best agreement = "
+             f"{fr['best_agreement_cell']}, conflict={fr['conflict']}")
+    except Exception as e:
+        _log(f"frontier unavailable: {e}")
+
     out = {
         "files": records,
         "macro": SR.macro_average(records),
         "gates": gates,
         "notes": notes,
         "candidates": cand,
+        "frontier": fr,
     }
     C.set_active(keys[0])
     C.write_json(C.OUT_ROOT / "suite" / "suite.json", out)
-    md = SR.render_suite(records, gates, notes, rec_cand=cand, rec_e2e=e2e)
+    md = SR.render_suite(records, gates, notes, rec_cand=cand, rec_e2e=e2e, frontier=fr)
     p = C.OUT_ROOT / "suite" / "suite.md"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(md, encoding="utf-8")
