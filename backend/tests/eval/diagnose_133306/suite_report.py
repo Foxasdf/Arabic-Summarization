@@ -553,6 +553,36 @@ def render_suite(records: List[Dict[str, Any]], gates: List[Dict[str, Any]],
                  "recovered span — the same thing Arm C supplies for the main pass — because without it the "
                  "inserted words are attributed to whichever speaker the interpolation happened to place "
                  "them next to, and that is what the WER regression actually measures.\n")
+
+        L.append("### Following that conclusion: does acoustic timing rescue it?\n")
+        L.append("The conclusion above was testable, so it was tested. The decoded hole text is now aligned "
+                 "to the hole's own audio with the same forced aligner Arm C uses, restricted to the voiced "
+                 "part of the hole, instead of being spread by interpolation. The 8.8 s case shows the "
+                 "placement problem fixed outright: the words land at **84.5–87.1 s**, where the reference "
+                 "puts that line (84.0–87.5 s), rather than starting at 78.5 s.\n")
+        L.append("| file | DER | missing speech (s) | word agreement | WER |")
+        L.append("|---|---|---|---|---|")
+        L.append("| `133306` | 0.3152 → 0.3007 (−0.0145) | 34.3 → **25.4** | 88.1 → **88.5** (+0.40) | "
+                 "0.5033 → 0.5267 (+0.0234) |")
+        L.append("| `nlp_5min` | 0.1012 → 0.0993 (−0.0019) | 6.8 → **5.2** | 74.8 → 74.5 | "
+                 "0.2723 → 0.2754 (+0.0031) |")
+        L.append("")
+        L.append("Acoustic timing is a clear improvement over interpolation on every axis that is not WER: "
+                 "word agreement now *rises* on `133306` (+0.40) where interpolation dropped it by 2.0, "
+                 "missing speech falls further (34.3 → 25.4 s), and the WER damage is less than half the "
+                 "original (from +0.0600 to +0.0234). So the hypothesis was right about the mechanism.\n")
+        L.append("It is still not adoptable, and the remaining obstacle is content rather than placement. "
+                 "With the rate rule gating holes, the decodes that survive are short — one to four words — "
+                 "against reference spans of 12–41 words, because the rule that protects WER also discards "
+                 "exactly the long holes where a full utterance was dropped. The words that do get inserted "
+                 "are correct where they survive (the 8.8 s case recovers its line verbatim, aligned "
+                 "correctly), but there are too few of them to outweigh the cost of the ones that are "
+                 "off-target.\n")
+        L.append("**Final verdict: not adopted.** Three successive fixes moved this from WER +0.0600 to "
+                 "+0.0234 while keeping a genuine DER gain, and it did not cross over. Recovering dropped "
+                 "utterances needs a decoder that emits the missing span *and* its timing in one pass, not a "
+                 "post-hoc splice of one-pass decodes — which is a change to the ASR stage, not to "
+                 "alignment.\n")
     L.append("")
 
     L.append("## Error attribution per file\n")
