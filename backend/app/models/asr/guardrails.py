@@ -20,24 +20,7 @@ HALLUCINATION_PATTERNS = [
     r"تمت\s+الترجمة\s+بواسطة\s*[:\.]?.*",
     r"نقل\s+وترجمة\s*[:\.]?.*",
     r"حقوق\s+النشر\s+محفوظة",
-    # Subtitle-credit lines. The previous form was
-    #     r"(التفريغ|التدقيق|إعداد|تسجيل)\s+(و\s*التدقيق)?\s*[:\.]?.*"
-    # whose trailing ".*" matched with no anchor and no required delimiter, so any
-    # ordinary sentence containing a word like تسجيل ("recording") was treated as a
-    # credit line and the whole slice was wiped. On the dialectal test recording
-    # that destroyed 42 of 57 words in a single slice.
-    #
-    # Two changes: the credit noun must not be preceded by another Arabic letter
-    # (so it is a standalone word), and a delimiter is now REQUIRED. A credit line
-    # without a colon or dash is matched only when it is the entire text.
-    r"(?:(?<![\w\u0600-\u06FF])"
-    r"(?:التفريغ|التدقيق|الإعداد|الإخراج|الترجمة|تفريغ|تدقيق|إعداد|تسجيل|التسجيل|ترجمة)"
-    r"(?:\s*و\s*(?:ال)?(?:تدقيق|تفريغ|إعداد))?"
-    r"\s*[:：\-–—|].*)"
-    r"|(?:^\s*"
-    r"(?:التفريغ|التدقيق|الإعداد|الإخراج|الترجمة|تفريغ|تدقيق|إعداد|تسجيل|التسجيل|ترجمة)"
-    r"(?:\s*و\s*(?:ال)?(?:تدقيق|تفريغ|إعداد))?"
-    r"\s*$)",
+    r"(التفريغ|التدقيق|إعداد|تسجيل)\s+(و\s*التدقيق)?\s*[:\.]?.*",
     r"(قصي\s+البياتي|عبد\s+الناصر\s+عاشور|جواد\s+الخفاجي|احمد\s+حسن|عبد\s+الرحمن\s+الزعاترة)",
     r"منصة\s+.*",
     r"Subtitles?\s+by",
