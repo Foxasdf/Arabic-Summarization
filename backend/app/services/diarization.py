@@ -539,84 +539,30 @@ def _diarize_builtin(audio_path: Path, num_speakers: Optional[int]) -> List[Dict
 # =============================================================================
 def _normalize_turns(turns: List[Dict]) -> List[Dict]:
     """
-    Clean, resolve overlaps non-destructively, preserve conversational interjections,
-    and label SPEAKER_00.. in order of appearance.
-    Guarantees no inverted timestamps, no zero-length segments, and no discarded speech.
+    Clean, merge contiguous turns, preserve overlapping speech and conversational
+    interjections, and label SPEAKER_00.. in order of appearance.
+    Core cleaning delegates to alignment.clean_diarization_turns (single source of
+    truth), which filters micro-noise and merges same-speaker gaps. Overlaps are
+    kept intentionally and resolved later during word-level alignment.
+
+    NOTE: do not reintroduce destructive overlap resolution here. An earlier
+    midpoint-truncation pass cost ~3 DER points on 133306 (0.3199 -> 0.3496).
     """
     if not turns:
         return []
 
-    # 1. Filter micro-noise < 0.15s
-    valid = [
+    from .alignment import clean_diarization_turns
+
+    # Clamp invalid negative offsets before delegating to the shared cleaner.
+    sanitized = [
         {"speaker": str(t["speaker"]), "start": max(0.0, float(t["start"])), "end": float(t["end"])}
         for t in turns
-        if (float(t["end"]) - max(0.0, float(t["start"]))) >= 0.15
     ]
-    if not valid:
+    resolved = clean_diarization_turns(sanitized, min_dur=0.15, merge_gap=0.5)
+    if not resolved:
         return []
 
-    # 2. Chronological same-speaker merging (gap <= 0.4s) without crushing other speakers
-    valid.sort(key=lambda t: (t["start"], t["end"]))
-    all_clean: List[Dict] = []
-    for t in valid:
-        if not all_clean:
-            all_clean.append(dict(t))
-            continue
-        prev = all_clean[-1]
-        if t["speaker"] == prev["speaker"] and 0.0 <= (t["start"] - prev["end"]) <= 0.4:
-            prev["end"] = max(prev["end"], t["end"])
-        else:
-            all_clean.append(dict(t))
-
-    # 3. Handle interjections and floor handovers:
-    # Short interjections (<= 1.8s) nested inside a different speaker's longer turn
-    # partition the primary turn so the interjection receives its own floor turn.
-    interjections = [t for t in all_clean if (t["end"] - t["start"]) <= 1.8]
-    long_turns = [t for t in all_clean if (t["end"] - t["start"]) > 1.8]
-
-    current_turns = list(long_turns)
-    for inj in interjections:
-        new_turns: List[Dict] = []
-        punched = False
-        for lt in current_turns:
-            if lt["speaker"] != inj["speaker"] and lt["start"] <= inj["start"] and inj["end"] <= lt["end"]:
-                if inj["start"] - lt["start"] >= 0.25:
-                    new_turns.append({"speaker": lt["speaker"], "start": lt["start"], "end": inj["start"]})
-                new_turns.append(dict(inj))
-                if lt["end"] - inj["end"] >= 0.25:
-                    new_turns.append({"speaker": lt["speaker"], "start": inj["end"], "end": lt["end"]})
-                punched = True
-            else:
-                new_turns.append(lt)
-        if not punched:
-            new_turns.append(dict(inj))
-        current_turns = new_turns
-
-    # 4. Sort and resolve boundary overlaps at midpoint
-    current_turns.sort(key=lambda t: (t["start"], t["end"]))
-    resolved: List[Dict] = []
-    for t in current_turns:
-        if not resolved:
-            resolved.append(dict(t))
-            continue
-        prev = resolved[-1]
-        if t["start"] < prev["end"]:
-            if t["speaker"] == prev["speaker"]:
-                prev["end"] = max(prev["end"], t["end"])
-                continue
-            ov = prev["end"] - t["start"]
-            if ov > 0:
-                mid = round((t["start"] + prev["end"]) / 2.0, 2)
-                if mid > prev["start"] + 0.1:
-                    prev["end"] = mid
-                if mid < t["end"] - 0.1:
-                    t["start"] = mid
-        if prev["end"] <= prev["start"] + 0.1:
-            resolved.pop()
-        if (t["end"] - t["start"]) >= 0.2:
-            resolved.append(dict(t))
-
-    # 5. Rename speakers cleanly by order of appearance
+    # Rename speakers cleanly by order of appearance
     mapping: Dict[str, str] = {}
     for t in resolved:
         spk = t["speaker"]

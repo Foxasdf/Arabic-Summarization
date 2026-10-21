@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Runner for Pyannote Speaker Diarization + Cohere Transcribe Arabic ASR.
-Uses tuned Pyannote 3.1 parameters (threshold=0.75, min_duration_off=0.45s)
+Uses the production Pyannote 3.1 config (clustering threshold 0.7046, min_duration_off=0.35s)
 and offline GPU-accelerated Cohere ASR (GGUF via transcribe_cpp / Vulkan).
 Tests both standard test audio files:
   1. audio_nlp_1_5min.wav
@@ -79,9 +79,9 @@ def prepare_16k_wav(audio_path: Path) -> Path:
 
 def run_pyannote_diarization(audio_path: Path, num_speakers: Optional[int] = None) -> List[Dict[str, Any]]:
     """
-    Run Pyannote speaker diarization with tuned parameters.
+    Run Pyannote speaker diarization with the production config.
     """
-    print(f"[*] Running Pyannote Diarization (tuned threshold=0.75) for {audio_path.name}...")
+    print(f"[*] Running Pyannote Diarization (production config) for {audio_path.name}...")
     t0 = time.time()
 
     def on_progress(pct, msg):
@@ -146,7 +146,7 @@ def run_cohere_transcription(audio_path: Path, turns: List[Dict[str, Any]]) -> L
 
 def process_audio_file(audio_path: Path):
     print("\n" + "=" * 70)
-    print(f"PROCESSING: {audio_path.name} (Cohere + Tuned Pyannote)")
+    print(f"PROCESSING: {audio_path.name} (Cohere + Pyannote)")
     print("=" * 70)
 
     if not audio_path.exists():
@@ -159,7 +159,7 @@ def process_audio_file(audio_path: Path):
     # Preprocess audio to 16kHz mono WAV
     audio_16k = prepare_16k_wav(audio_path)
 
-    # 1. Pyannote Diarization (with tuned parameters)
+    # 1. Pyannote Diarization (production config)
     diar_turns = run_pyannote_diarization(audio_16k)
 
     # 2. Cohere ASR Transcription
@@ -174,7 +174,7 @@ def process_audio_file(audio_path: Path):
     payload = {
         "audio_file": audio_path.name,
         "engine": "Cohere Transcribe Arabic (Q5_K_M GGUF)",
-        "diarization_engine": "Pyannote 3.1 (Tuned threshold=0.75)",
+        "diarization_engine": "Pyannote 3.1 (production config)",
         "speakers_detected": sorted(list(set(s["speaker"] for s in segments))),
         "turns_count": len(segments),
         "full_text": full_text,
@@ -187,7 +187,7 @@ def process_audio_file(audio_path: Path):
     with open(output_txt, "w", encoding="utf-8") as f:
         f.write(f"Audio File: {audio_path.name}\n")
         f.write(f"ASR Model: {COHERE_MODEL_NAME}\n")
-        f.write(f"Diarization: Pyannote 3.1 (Tuned: threshold=0.75, min_dur=0.15s)\n")
+        f.write(f"Diarization: Pyannote 3.1 (threshold=0.7046, min_duration_off=0.35s)\n")
         f.write(f"Speakers Detected: {payload['speakers_detected']}\n")
         f.write("=" * 60 + "\n\n")
         f.write("--- DIARIZED TRANSCRIPT ---\n\n")

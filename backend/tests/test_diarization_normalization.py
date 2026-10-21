@@ -15,10 +15,10 @@ class TestDiarizationNormalization(unittest.TestCase):
         self.assertEqual(_normalize_turns([]), [])
 
     def test_micro_noise_filtered(self):
-        # All turns < 0.25s should be filtered
+        # All turns shorter than 0.15s should be filtered
         turns = [
-            {"speaker": "SPK1", "start": 0.0, "end": 0.15},
-            {"speaker": "SPK2", "start": 0.5, "end": 0.70},  # 0.20s < 0.25s
+            {"speaker": "SPK1", "start": 0.0, "end": 0.10},
+            {"speaker": "SPK2", "start": 0.5, "end": 0.64},
         ]
         self.assertEqual(_normalize_turns(turns), [])
 
@@ -42,34 +42,25 @@ class TestDiarizationNormalization(unittest.TestCase):
         self.assertEqual(res[0]["start"], 0.0)
         self.assertEqual(res[0]["end"], 4.0)
 
-    def test_interjection_punching(self):
-        # Short interjection (<= 1.8s) nested inside a different speaker's longer turn (> 1.8s)
-        # Long turn: SPK_A 10.0 to 20.0 (dur 10.0s)
-        # Interjection: SPK_B 14.0 to 15.0 (dur 1.0s)
+    def test_interjection_kept_as_overlapping_turn(self):
+        # A short interjection nested inside another speaker's long turn is preserved
+        # as-is (overlapping) rather than punching a hole in the primary turn.
         turns = [
             {"speaker": "SPK_A", "start": 10.0, "end": 20.0},
             {"speaker": "SPK_B", "start": 14.0, "end": 15.0},
         ]
         res = _normalize_turns(turns)
-        self.assertEqual(len(res), 3)
-        # First turn: SPK_A (10.0 - 14.0)
+        self.assertEqual(len(res), 2)
         self.assertEqual(res[0]["speaker"], "SPEAKER_00")
         self.assertEqual(res[0]["start"], 10.0)
-        self.assertEqual(res[0]["end"], 14.0)
+        self.assertEqual(res[0]["end"], 20.0)
 
-        # Second turn: SPK_B (14.0 - 15.0)
         self.assertEqual(res[1]["speaker"], "SPEAKER_01")
         self.assertEqual(res[1]["start"], 14.0)
         self.assertEqual(res[1]["end"], 15.0)
 
-        # Third turn: SPK_A (15.0 - 20.0)
-        self.assertEqual(res[2]["speaker"], "SPEAKER_00")
-        self.assertEqual(res[2]["start"], 15.0)
-        self.assertEqual(res[2]["end"], 20.0)
-
-    def test_midpoint_overlap_resolution(self):
-        # Two different speakers overlapping: SPK_A (0.0 to 5.0) and SPK_B (4.0 to 9.0)
-        # Overlap: 4.0 to 5.0 (midpoint = 4.5)
+    def test_overlapping_turns_preserved(self):
+        # Overlapping speech is kept intact; word alignment resolves it later.
         turns = [
             {"speaker": "SPK_A", "start": 0.0, "end": 5.0},
             {"speaker": "SPK_B", "start": 4.0, "end": 9.0},
@@ -78,10 +69,10 @@ class TestDiarizationNormalization(unittest.TestCase):
         self.assertEqual(len(res), 2)
         self.assertEqual(res[0]["speaker"], "SPEAKER_00")
         self.assertEqual(res[0]["start"], 0.0)
-        self.assertEqual(res[0]["end"], 4.5)
+        self.assertEqual(res[0]["end"], 5.0)
 
         self.assertEqual(res[1]["speaker"], "SPEAKER_01")
-        self.assertEqual(res[1]["start"], 4.5)
+        self.assertEqual(res[1]["start"], 4.0)
         self.assertEqual(res[1]["end"], 9.0)
 
     def test_appearance_order_speaker_naming(self):
@@ -120,14 +111,14 @@ class TestDiarizationNormalization(unittest.TestCase):
         self.assertEqual(res[0]["start"], 1.0)
         self.assertEqual(res[0]["end"], 3.0)
 
-    def test_short_interjection_punching_preserved(self):
-        # Verify that rapid conversational interjections (e.g. 0.35s) punch longer turns
+    def test_short_interjection_preserved(self):
+        # Rapid conversational interjections (e.g. 0.35s) survive normalization
         turns = [
             {"speaker": "HOST", "start": 10.0, "end": 20.0},
             {"speaker": "GUEST", "start": 14.0, "end": 14.35},  # 0.35s interjection
         ]
         res = _normalize_turns(turns)
-        self.assertEqual(len(res), 3)
+        self.assertEqual(len(res), 2)
         self.assertEqual(res[1]["speaker"], "SPEAKER_01")
         self.assertEqual(res[1]["start"], 14.0)
         self.assertEqual(res[1]["end"], 14.35)
