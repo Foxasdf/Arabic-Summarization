@@ -46,6 +46,7 @@ def transcribe_with_speakers(
     on_progress: Optional[Callable[[int, str], None]] = None,
     model_identifier: Optional[Union[str, Path]] = None,
     progress_range: tuple = (25, 95),
+    speaker_audio_path: Optional[Path] = None,
 ) -> list:
     """
     Speaker-aware transcription pipeline:
@@ -55,6 +56,7 @@ def transcribe_with_speakers(
          - Aligns words acoustically (CTranslate2/Whisper on CUDA/CPU) with relative VAD fallback.
          - Assigns words to speakers using midpoint containment & temporal overlap.
          - Smooths spurious single-word flip-flops and builds natural conversational utterances.
+         - Optionally rechecks short word runs against cached speaker embeddings.
       3. If no speaker turns exist, returns single-speaker utterance.
     - Legacy (ASR_MODE='per_turn'):
       Calls engine.transcribe_turns for ablation and backward compatibility.
@@ -159,7 +161,21 @@ def transcribe_with_speakers(
     if on_progress:
         on_progress(hi - 2, "جاري إسناد المتحدثين وتنسيق الجمل...")
 
-    segments = align_timestamps(words, turns)
+    # Reuse the cached Pyannote embedding model to correct short word runs that
+    # overlap a neighbouring speaker's continuous utterance. Falls back cleanly
+    # when embeddings are unavailable.
+    speaker_context = None
+    if turns:
+        from .diarization import build_speaker_embedding_context
+
+        if on_progress:
+            on_progress(hi - 1, "جاري التحقق من بصمات المتحدثين...")
+        speaker_context = build_speaker_embedding_context(
+            Path(speaker_audio_path or audio_path),
+            turns,
+        )
+
+    segments = align_timestamps(words, turns, speaker_context=speaker_context)
     if not segments and text:
         segments = [{
             "speaker": turns[0].get("speaker", "SPEAKER_00") if turns else "SPEAKER_00",

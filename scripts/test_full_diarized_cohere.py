@@ -79,6 +79,7 @@ async def main():
         turns=turns,
         on_progress=asr_progress,
         model_identifier="cohere-transcribe-arabic-07-2026-Q5_K_M.gguf",
+        speaker_audio_path=spk_wav,
     )
     print(f"ASR completed in {time.time() - t_asr_start:.1f}s with {len(segments)} transcribed segments.")
     

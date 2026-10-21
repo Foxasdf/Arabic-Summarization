@@ -179,7 +179,10 @@ async def transcribe_endpoint(
                 yield _sse({"step": "asr", "progress": 25, "message": "جاري تفريغ الصوت وتنسيق المتحدثين..."})
                 segments = None
                 async for kind, val in _run_with_progress(
-                    transcribe_with_speakers, wav_path, turns, model_identifier=asr_model, progress_range=(25, 95)
+                    transcribe_with_speakers, wav_path, turns,
+                    model_identifier=asr_model,
+                    progress_range=(25, 95),
+                    speaker_audio_path=spk_wav_path,
                 ):
                     if kind == "progress":
                         yield _sse({"step": "asr", "progress": val[0], "message": val[1]})

@@ -19,7 +19,7 @@ from pathlib import Path
 import logging
 import yaml
 import urllib.request
-from typing import List, Dict, Optional, Callable
+from typing import Any, List, Dict, Optional, Callable
 
 import numpy as np
 
@@ -600,6 +600,68 @@ def _get_embedding_inference(pipeline):
     return None
 
 
+def _embed_turns(
+    audio: np.ndarray,
+    turns: List[Dict],
+    embed,
+    min_duration: float = _REFINE_TURN_MIN_SEC,
+    max_duration: float = _REFINE_MAX_EMBED_SEC,
+) -> List[Optional[np.ndarray]]:
+    """Embed each turn with a centered crop, returning L2-normalized vectors."""
+    import torch
+
+    min_samples = int(min_duration * SR)
+    max_samples = int(max_duration * SR)
+    embeddings: List[Optional[np.ndarray]] = []
+
+    for turn in turns:
+        start = max(0, int(float(turn["start"]) * SR))
+        end = min(len(audio), int(float(turn["end"]) * SR))
+        if end - start < min_samples:
+            embeddings.append(None)
+            continue
+
+        # Cap the crop length; a centered 3 s window is enough for a stable
+        # embedding and keeps the pass cheap on long monologues.
+        if end - start > max_samples:
+            mid = (start + end) // 2
+            start = max(0, mid - max_samples // 2)
+            end = min(len(audio), start + max_samples)
+
+        chunk = np.ascontiguousarray(audio[start:end], dtype=np.float32)
+        chunk = torch.from_numpy(chunk).unsqueeze(0).unsqueeze(0)
+        with torch.inference_mode():
+            emb_obj = embed(chunk)
+        if hasattr(emb_obj, "detach"):
+            emb_obj = emb_obj.detach().cpu().numpy()
+        emb = np.asarray(emb_obj, dtype=np.float32).reshape(-1)
+        norm = float(np.linalg.norm(emb))
+        embeddings.append(emb / norm if norm > 0 else None)
+
+    return embeddings
+
+
+def _build_speaker_centroids(
+    turns: List[Dict],
+    embeddings: List[Optional[np.ndarray]],
+    centroid_min_duration: float = _REFINE_CENTROID_MIN_SEC,
+) -> Dict[str, np.ndarray]:
+    """Build one normalized centroid per speaker from sufficiently long turns."""
+    per_speaker: Dict[str, List[np.ndarray]] = {}
+    for turn, emb in zip(turns, embeddings):
+        if emb is None or (turn["end"] - turn["start"]) < centroid_min_duration:
+            continue
+        per_speaker.setdefault(turn["speaker"], []).append(emb)
+
+    centroids: Dict[str, np.ndarray] = {}
+    for spk, vecs in per_speaker.items():
+        mean = np.mean(vecs, axis=0)
+        norm = float(np.linalg.norm(mean))
+        if norm > 0:
+            centroids[spk] = mean / norm
+    return centroids
+
+
 def _relabel_turns_from_embeddings(
     turns: List[Dict],
     embeddings: List[Optional[np.ndarray]],
@@ -620,18 +682,7 @@ def _relabel_turns_from_embeddings(
     if not turns:
         return []
 
-    per_speaker: Dict[str, List[np.ndarray]] = {}
-    for turn, emb in zip(turns, embeddings):
-        if emb is None or (turn["end"] - turn["start"]) < centroid_min_duration:
-            continue
-        per_speaker.setdefault(turn["speaker"], []).append(emb)
-
-    centroids: Dict[str, np.ndarray] = {}
-    for spk, vecs in per_speaker.items():
-        mean = np.mean(vecs, axis=0)
-        norm = float(np.linalg.norm(mean))
-        if norm > 0:
-            centroids[spk] = mean / norm
+    centroids = _build_speaker_centroids(turns, embeddings, centroid_min_duration)
 
     refined = [dict(t) for t in turns]
     if len(centroids) < 2:
@@ -671,36 +722,7 @@ def _refine_speaker_labels(
         logger.warning("Speaker embedding model unavailable; skipping label refinement.")
         return turns
 
-    import torch
-
-    min_samples = int(_REFINE_TURN_MIN_SEC * SR)
-    max_samples = int(_REFINE_MAX_EMBED_SEC * SR)
-    embeddings: List[Optional[np.ndarray]] = []
-
-    for turn in turns:
-        start = max(0, int(float(turn["start"]) * SR))
-        end = min(len(audio), int(float(turn["end"]) * SR))
-        if end - start < min_samples:
-            embeddings.append(None)
-            continue
-
-        # Cap the crop length; a centered 3 s window is enough for a stable
-        # embedding and keeps the second pass cheap on long monologues.
-        if end - start > max_samples:
-            mid = (start + end) // 2
-            start = max(0, mid - max_samples // 2)
-            end = min(len(audio), start + max_samples)
-
-        chunk = np.ascontiguousarray(audio[start:end], dtype=np.float32)
-        chunk = torch.from_numpy(chunk).unsqueeze(0).unsqueeze(0)
-        with torch.inference_mode():
-            emb_obj = embed(chunk)
-        if hasattr(emb_obj, "detach"):
-            emb_obj = emb_obj.detach().cpu().numpy()
-        emb = np.asarray(emb_obj, dtype=np.float32).reshape(-1)
-        norm = float(np.linalg.norm(emb))
-        embeddings.append(emb / norm if norm > 0 else None)
-
+    embeddings = _embed_turns(audio, turns, embed, min_duration=_REFINE_TURN_MIN_SEC)
     refined = _relabel_turns_from_embeddings(turns, embeddings)
     changed = sum(
         1 for before, after in zip(turns, refined)
@@ -712,3 +734,42 @@ def _refine_speaker_labels(
             f"across {len({t['speaker'] for t in refined})} speakers."
         )
     return refined
+
+
+def build_speaker_embedding_context(
+    audio_path: Path,
+    turns: List[Dict],
+    pipeline=None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Build turn embeddings and speaker centroids for post-ASR label smoothing.
+
+    The Pyannote pipeline is cached after diarization, so this reuses the
+    already-loaded embedding model instead of loading a second model. Returns
+    ``None`` when embeddings are unavailable, letting alignment fall back to
+    the existing temporal smoothing.
+    """
+    if not turns:
+        return None
+
+    try:
+        if pipeline is None:
+            pipeline = get_pyannote_pipeline()
+        embed = _get_embedding_inference(pipeline)
+        if embed is None:
+            logger.warning(
+                "Speaker embedding model unavailable; skipping short-run smoothing."
+            )
+            return None
+
+        audio = _load_wav(Path(audio_path))
+        embeddings = _embed_turns(audio, turns, embed, min_duration=0.20)
+        centroids = _build_speaker_centroids(turns, embeddings)
+        if len(centroids) < 2:
+            return None
+        return {"embeddings": embeddings, "centroids": centroids}
+    except Exception as exc:
+        logger.warning(
+            f"Speaker embedding context unavailable; skipping short-run smoothing: {exc}"
+        )
+        return None

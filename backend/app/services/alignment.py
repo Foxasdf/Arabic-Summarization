@@ -10,6 +10,8 @@ import re
 import logging
 from typing import List, Dict, Any, Union, Optional
 
+import numpy as np
+
 logger = logging.getLogger(__name__)
 
 
@@ -174,6 +176,122 @@ def smooth_speaker_assignments(
     return smoothed
 
 
+def _supporting_turn_stats(
+    turns: List[Dict[str, Any]],
+    turn_embeddings: List[Optional[np.ndarray]],
+    start: float,
+    end: float,
+    speaker: str,
+) -> tuple:
+    """Return total supporting-turn duration and mean embedding for a word run."""
+    total_duration = 0.0
+    vectors: List[np.ndarray] = []
+    for turn, emb in zip(turns, turn_embeddings):
+        if emb is None or turn.get("speaker") != speaker:
+            continue
+        overlap = max(
+            0.0,
+            min(end, float(turn.get("end", 0.0)))
+            - max(start, float(turn.get("start", 0.0))),
+        )
+        if overlap < 0.1:
+            continue
+        total_duration += float(turn.get("end", 0.0)) - float(turn.get("start", 0.0))
+        vectors.append(emb)
+
+    if not vectors:
+        return total_duration, None
+    mean = np.mean(vectors, axis=0)
+    norm = float(np.linalg.norm(mean))
+    return total_duration, (mean / norm if norm > 0 else None)
+
+
+def smooth_short_runs_with_embeddings(
+    words: List[Dict[str, Any]],
+    turns: List[Dict[str, Any]],
+    turn_embeddings: List[Optional[np.ndarray]],
+    speaker_centroids: Dict[str, np.ndarray],
+    max_run_sec: float = 0.35,
+    max_run_words: int = 3,
+    max_support_sec: float = 1.0,
+    margin: float = 0.05,
+) -> List[Dict[str, Any]]:
+    """
+    Absorb short word runs that are acoustically closer to the surrounding
+    speaker than to their current label.
+
+    A run is only considered when:
+    1. It is a very short fragment (<= max_run_sec) or at most max_run_words.
+    2. Both neighbouring runs belong to the same speaker.
+    3. The supporting turn for the current label is <= max_support_sec, so a
+       genuine longer interjection is never absorbed just because it is short.
+    4. The surrounding speaker's centroid is better by at least ``margin``.
+
+    This targets Pyannote's short overlapping turns stealing a few words from
+    a continuous utterance without flattening intentional backchannels.
+    """
+    if len(words) < 3 or not turns or not turn_embeddings or not speaker_centroids:
+        return words
+    if len(turns) != len(turn_embeddings):
+        logger.warning(
+            "Speaker embedding context does not match turns; skipping short-run smoothing."
+        )
+        return words
+
+    smoothed = [dict(w) for w in words]
+    runs: List[Dict[str, Any]] = []
+    for i, w in enumerate(smoothed):
+        if runs and runs[-1]["spk"] == w.get("speaker"):
+            runs[-1]["end"] = i
+        else:
+            runs.append({"spk": w.get("speaker"), "start": i, "end": i})
+
+    changed = 0
+    for run in runs:
+        i0, i1 = run["start"], run["end"]
+        if i0 == 0 or i1 == len(smoothed) - 1:
+            continue
+
+        current = run["spk"]
+        prev_spk = smoothed[i0 - 1].get("speaker")
+        next_spk = smoothed[i1 + 1].get("speaker")
+        if prev_spk != next_spk or current == prev_spk:
+            continue
+
+        start = float(smoothed[i0].get("start", 0.0))
+        end = float(smoothed[i1].get("end", start))
+        duration = end - start
+        n_words = i1 - i0 + 1
+        if duration > max_run_sec and n_words > max_run_words:
+            continue
+
+        support_duration, support_emb = _supporting_turn_stats(
+            turns, turn_embeddings, start, end, current
+        )
+        if support_emb is None or support_duration > max_support_sec:
+            continue
+
+        current_centroid = speaker_centroids.get(current)
+        neighbour_centroid = speaker_centroids.get(prev_spk)
+        if current_centroid is None or neighbour_centroid is None:
+            continue
+
+        current_sim = float(np.dot(support_emb, current_centroid))
+        neighbour_sim = float(np.dot(support_emb, neighbour_centroid))
+        if neighbour_sim - current_sim < margin:
+            continue
+
+        for i in range(i0, i1 + 1):
+            smoothed[i]["speaker"] = prev_spk
+        changed += 1
+
+    if changed:
+        logger.info(
+            f"Short-run smoothing reassigned {changed} word run(s) using speaker embeddings."
+        )
+    return smoothed
+
+
 def merge_consecutive_speaker_segments(segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Merge consecutive segments belonging to the same speaker into a single segment.
@@ -273,10 +391,18 @@ def build_utterances_from_words(
     return merge_consecutive_speaker_segments(utterances)
 
 
-def align_timestamps(asr_words: Any, diarization_segments: List[Dict]) -> List[Dict]:
+def align_timestamps(
+    asr_words: Any,
+    diarization_segments: List[Dict],
+    speaker_context: Optional[Dict[str, Any]] = None,
+) -> List[Dict]:
     """
     Word-level monotonic sequence alignment between continuous ASR words
     and Pyannote speaker diarization intervals.
+
+    ``speaker_context`` may contain per-turn embeddings and per-speaker
+    centroids from the cached Pyannote embedding model. When present, short
+    mislabelled word runs are absorbed into the surrounding speaker.
     """
     if isinstance(asr_words, dict):
         asr_words = asr_words.get("words", [])
@@ -316,6 +442,16 @@ def align_timestamps(asr_words: Any, diarization_segments: List[Dict]) -> List[D
     # Phase 4: Word-Level Speaker Assignment, Smoothing, and Utterance Construction
     assigned = assign_words_to_speakers(deduped_words, turns)
     smoothed = smooth_speaker_assignments(assigned, turns)
+    if speaker_context:
+        embeddings = speaker_context.get("embeddings")
+        centroids = speaker_context.get("centroids")
+        if embeddings is not None and centroids:
+            smoothed = smooth_short_runs_with_embeddings(
+                smoothed,
+                diarization_segments,
+                embeddings,
+                centroids,
+            )
     raw_segments = build_utterances_from_words(smoothed)
     segments = merge_consecutive_speaker_segments(raw_segments)
 
