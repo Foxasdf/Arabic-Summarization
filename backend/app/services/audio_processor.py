@@ -12,6 +12,19 @@ from ..config import settings
 logger = logging.getLogger(__name__)
 
 
+def _can_run_ffmpeg(binary_path: str) -> bool:
+    try:
+        proc = subprocess.run(
+            [binary_path, "-version"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
 def get_ffmpeg_binary() -> str:
     """Find an ffmpeg binary that runs on *this* OS (project may be copied between Windows/Linux/macOS)."""
     is_win = sys.platform.startswith("win")
@@ -22,17 +35,20 @@ def get_ffmpeg_binary() -> str:
     # 1. Bundled per-OS binary: backend/bin/<os>/ffmpeg[.exe], or legacy backend/bin/ffmpeg.exe on Windows
     for cand in (bin_dir / plat / exe, bin_dir / exe):
         if cand.exists() and (is_win or os.access(cand, os.X_OK)):
-            return str(cand)
+            if _can_run_ffmpeg(str(cand)):
+                return str(cand)
 
     # 2. System PATH
     system_ffmpeg = shutil.which(exe)
-    if system_ffmpeg:
+    if system_ffmpeg and _can_run_ffmpeg(system_ffmpeg):
         return system_ffmpeg
 
     # 3. imageio-ffmpeg (pip wheel ships a binary for each OS)
     try:
         import imageio_ffmpeg
-        return imageio_ffmpeg.get_ffmpeg_exe()
+        img_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if img_exe and _can_run_ffmpeg(img_exe):
+            return img_exe
     except Exception:
         pass
 

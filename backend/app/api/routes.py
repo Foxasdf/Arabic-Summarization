@@ -117,6 +117,7 @@ async def transcribe_endpoint(
                 yield _sse({"error": "File not found"})
                 return
             wav_path = settings.UPLOAD_DIR / f"{file_id}.16k.wav"
+            spk_wav_path = settings.UPLOAD_DIR / f"{file_id}.speaker.16k.wav"
 
             async with _model_lock:
                 denoise_names = {
@@ -139,7 +140,6 @@ async def transcribe_endpoint(
                     denoise_label = f" (عزل: {mode_str})"
                 else:
                     denoise_label = ""
-                spk_wav_path = settings.UPLOAD_DIR / f"{file_id}.speaker.16k.wav"
                 yield _sse({"step": "preprocessing", "progress": 3, "message": f"جاري تجهيز وتنقية الملف الصوتي{denoise_label}..."})
                 ok, err = await process_dual_profile_audio(files[0], wav_path, spk_wav_path, denoise_mode=denoise_mode)
                 if not ok:
@@ -198,13 +198,19 @@ async def transcribe_endpoint(
             speakers = {s["speaker"]: old.get(s["speaker"], default_speaker_name(s["speaker"])) for s in segments}
             await save_meeting({"id": file_id, "transcript_json": segments, "diarization_json": turns,
                                 "speakers_json": speakers, "status": "transcribed"})
-            try:
-                wav_path.unlink()
-            except OSError:
-                pass
+            for p in (wav_path, spk_wav_path):
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError:
+                    pass
             yield _sse({"step": "done", "progress": 100, "result": segments, "speakers": speakers})
         except Exception as e:
             logger.exception("Transcription failed")
+            for p in (wav_path, spk_wav_path):
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError:
+                    pass
             await save_meeting({"id": file_id, "status": "error"})
             yield _sse({"error": str(e)})
 

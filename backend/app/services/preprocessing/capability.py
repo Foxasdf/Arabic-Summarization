@@ -17,8 +17,21 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 
+def _can_run_ffmpeg(binary_path: str) -> bool:
+    try:
+        proc = subprocess.run(
+            [binary_path, "-version"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
 def find_ffmpeg_binary() -> str:
-    """Find FFmpeg binary across operating systems."""
+    """Find FFmpeg binary across operating systems, verifying execution capability."""
     is_win = sys.platform.startswith("win")
     exe = "ffmpeg.exe" if is_win else "ffmpeg"
     # Look in backend/bin
@@ -27,15 +40,18 @@ def find_ffmpeg_binary() -> str:
 
     for cand in (backend_bin / plat / exe, backend_bin / exe):
         if cand.exists() and (is_win or os.access(cand, os.X_OK)):
-            return str(cand)
+            if _can_run_ffmpeg(str(cand)):
+                return str(cand)
 
     system_ffmpeg = shutil.which(exe)
-    if system_ffmpeg:
+    if system_ffmpeg and _can_run_ffmpeg(system_ffmpeg):
         return system_ffmpeg
 
     try:
         import imageio_ffmpeg
-        return imageio_ffmpeg.get_ffmpeg_exe()
+        img_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if img_exe and _can_run_ffmpeg(img_exe):
+            return img_exe
     except Exception:
         pass
 

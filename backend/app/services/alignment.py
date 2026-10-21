@@ -155,10 +155,17 @@ def smooth_speaker_assignments(
         next_spk = smoothed[i + 1]["speaker"]
 
         if prev_spk == next_spk and curr_spk != prev_spk:
-            w_mid = (smoothed[i]["start"] + smoothed[i]["end"]) / 2.0
-            # Check if Pyannote actually had a distinct confirmed turn for curr_spk at w_mid
+            w_st = smoothed[i]["start"]
+            w_en = smoothed[i]["end"]
+            w_mid = (w_st + w_en) / 2.0
+            # Check if Pyannote actually had a distinct confirmed turn for curr_spk at or overlapping this word
             confirmed_turn = any(
-                t["speaker"] == curr_spk and t["start"] <= w_mid <= t["end"] and (t["end"] - t["start"]) >= 0.45
+                t["speaker"] == curr_spk
+                and (
+                    t["start"] <= w_mid <= t["end"]
+                    or max(0.0, min(w_en, t["end"]) - max(w_st, t["start"])) >= 0.1
+                )
+                and (t["end"] - t["start"]) >= 0.20
                 for t in turns
             )
             if not confirmed_turn:

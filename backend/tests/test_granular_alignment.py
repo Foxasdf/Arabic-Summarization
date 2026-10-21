@@ -224,6 +224,25 @@ class TestGranularAlignment(unittest.TestCase):
         self.assertEqual(len(res_c), 1)
         self.assertEqual(res_c[0]["text"], "مرحباً بكم")
 
+    def test_short_confirmed_interjection_not_smoothed(self):
+        # A 0.35s turn for SPEAKER_01 nested between SPEAKER_00 speech must be preserved
+        words = [
+            {"word": "المشروع", "start": 20.0, "end": 20.5},
+            {"word": "صح", "start": 20.65, "end": 20.95},
+            {"word": "تماماً", "start": 21.4, "end": 22.0},
+        ]
+        turns = [
+            {"speaker": "SPEAKER_00", "start": 19.0, "end": 20.62},
+            {"speaker": "SPEAKER_01", "start": 20.62, "end": 20.97},  # dur 0.35s
+            {"speaker": "SPEAKER_00", "start": 21.0, "end": 23.0},
+        ]
+        res = align_timestamps(words, turns)
+        self.assertEqual(len(res), 3)
+        self.assertEqual(res[0]["speaker"], "SPEAKER_00")
+        self.assertEqual(res[1]["speaker"], "SPEAKER_01")
+        self.assertEqual(res[1]["text"], "صح")
+        self.assertEqual(res[2]["speaker"], "SPEAKER_00")
+
 
 if __name__ == "__main__":
     unittest.main()

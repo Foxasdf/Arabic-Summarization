@@ -10,6 +10,11 @@ import logging
 from pathlib import Path
 import numpy as np
 
+# Ensure backend venv site-packages is in sys.path
+_venv_site = Path(__file__).resolve().parents[4] / "backend" / ".venv" / "Lib" / "site-packages"
+if _venv_site.exists() and str(_venv_site) not in sys.path:
+    sys.path.insert(0, str(_venv_site))
+
 # Set standard output encoding to utf-8
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
