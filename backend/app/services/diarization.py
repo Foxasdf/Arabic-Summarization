@@ -330,6 +330,10 @@ def _diarize_pyannote_local(
 
     logger.info(f"Pyannote completed with {len(turns)} speaker segments.")
 
+    # Second pass: correct isolated long-turn cluster swaps using speaker embeddings.
+    _safe_progress(27, "جاري التحقق من تناسق بصمات المتحدثين...")
+    turns = _refine_speaker_labels(turns, audio_data, pipeline)
+
     # Cleanup temporary tensors and flush CUDA memory allocator cache
     # This releases all reserved VRAM back to the GPU driver so subsequent ASR
     # has 100% of GPU VRAM available for its multi-worker parallel transcription.
@@ -574,3 +578,137 @@ def _normalize_turns(turns: List[Dict]) -> List[Dict]:
 
     logger.info(f"Diarization output: {len(resolved)} turns, {len(mapping)} speakers.")
     return resolved
+
+
+# =============================================================================
+# Speaker label refinement (second pass over long turns)
+# =============================================================================
+_REFINE_CENTROID_MIN_SEC = 2.0
+_REFINE_TURN_MIN_SEC = 1.5
+_REFINE_MARGIN = 0.01
+_REFINE_MAX_EMBED_SEC = 3.0
+
+
+def _get_embedding_inference(pipeline):
+    """Return Pyannote's already-loaded speaker-embedding inference, if present."""
+    inferences = getattr(pipeline, "_inferences", None)
+    if isinstance(inferences, dict):
+        for key in ("_embedding", "embedding"):
+            embed = inferences.get(key)
+            if embed is not None:
+                return embed
+    return None
+
+
+def _relabel_turns_from_embeddings(
+    turns: List[Dict],
+    embeddings: List[Optional[np.ndarray]],
+    centroid_min_duration: float = _REFINE_CENTROID_MIN_SEC,
+    relabel_min_duration: float = _REFINE_TURN_MIN_SEC,
+    margin: float = _REFINE_MARGIN,
+) -> List[Dict]:
+    """
+    Second-pass speaker consistency check.
+
+    Pyannote's agglomerative clustering can occasionally place a long, clean
+    turn in the wrong cluster while the rest of that speaker's turns are
+    correct. Build one centroid per speaker from long turns, then move only
+    long turns whose embedding is closer to another speaker's centroid by at
+    least ``margin``. Short backchannels keep the clustering decision because
+    their embeddings are too noisy for a reliable global comparison.
+    """
+    if not turns:
+        return []
+
+    per_speaker: Dict[str, List[np.ndarray]] = {}
+    for turn, emb in zip(turns, embeddings):
+        if emb is None or (turn["end"] - turn["start"]) < centroid_min_duration:
+            continue
+        per_speaker.setdefault(turn["speaker"], []).append(emb)
+
+    centroids: Dict[str, np.ndarray] = {}
+    for spk, vecs in per_speaker.items():
+        mean = np.mean(vecs, axis=0)
+        norm = float(np.linalg.norm(mean))
+        if norm > 0:
+            centroids[spk] = mean / norm
+
+    refined = [dict(t) for t in turns]
+    if len(centroids) < 2:
+        return refined
+
+    for i, (turn, emb) in enumerate(zip(turns, embeddings)):
+        if emb is None or (turn["end"] - turn["start"]) < relabel_min_duration:
+            continue
+        current = turn["speaker"]
+        if current not in centroids:
+            continue
+        similarities = sorted(
+            ((float(np.dot(emb, centroid)), spk) for spk, centroid in centroids.items()),
+            reverse=True,
+        )
+        best_sim, best_spk = similarities[0]
+        if best_spk == current:
+            continue
+        runner_up = similarities[1][0]
+        if (best_sim - runner_up) >= margin:
+            refined[i]["speaker"] = best_spk
+
+    return refined
+
+
+def _refine_speaker_labels(
+    turns: List[Dict],
+    audio: np.ndarray,
+    pipeline,
+) -> List[Dict]:
+    """Embed long turns and relabel inconsistent ones against speaker centroids."""
+    if not turns:
+        return turns
+
+    embed = _get_embedding_inference(pipeline)
+    if embed is None:
+        logger.warning("Speaker embedding model unavailable; skipping label refinement.")
+        return turns
+
+    import torch
+
+    min_samples = int(_REFINE_TURN_MIN_SEC * SR)
+    max_samples = int(_REFINE_MAX_EMBED_SEC * SR)
+    embeddings: List[Optional[np.ndarray]] = []
+
+    for turn in turns:
+        start = max(0, int(float(turn["start"]) * SR))
+        end = min(len(audio), int(float(turn["end"]) * SR))
+        if end - start < min_samples:
+            embeddings.append(None)
+            continue
+
+        # Cap the crop length; a centered 3 s window is enough for a stable
+        # embedding and keeps the second pass cheap on long monologues.
+        if end - start > max_samples:
+            mid = (start + end) // 2
+            start = max(0, mid - max_samples // 2)
+            end = min(len(audio), start + max_samples)
+
+        chunk = np.ascontiguousarray(audio[start:end], dtype=np.float32)
+        chunk = torch.from_numpy(chunk).unsqueeze(0).unsqueeze(0)
+        with torch.inference_mode():
+            emb_obj = embed(chunk)
+        if hasattr(emb_obj, "detach"):
+            emb_obj = emb_obj.detach().cpu().numpy()
+        emb = np.asarray(emb_obj, dtype=np.float32).reshape(-1)
+        norm = float(np.linalg.norm(emb))
+        embeddings.append(emb / norm if norm > 0 else None)
+
+    refined = _relabel_turns_from_embeddings(turns, embeddings)
+    changed = sum(
+        1 for before, after in zip(turns, refined)
+        if before["speaker"] != after["speaker"]
+    )
+    if changed:
+        logger.info(
+            f"Speaker label refinement reassigned {changed}/{len(turns)} turns "
+            f"across {len({t['speaker'] for t in refined})} speakers."
+        )
+    return refined
