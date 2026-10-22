@@ -187,14 +187,14 @@ async def convert_to_wav(
         return False
 
 
-async def process_dual_profile_audio(
+def process_dual_profile_audio_sync(
     input_path: Path,
     asr_output_path: Path,
     speaker_output_path: Path,
     denoise_mode: Optional[str] = None,
 ) -> tuple[bool, Optional[str]]:
     """
-    Execute strict profile separation (Production v3.1):
+    Execute strict profile separation (Production v3.1) synchronously:
     1. ASR Profile: 16kHz mono, phase-aware downmix, conditional rumble highpass, evaluated denoiser preset.
     2. Speaker Profile: 16kHz mono, canonical UNPROCESSED audio (no denoise, no compression, no gain).
     Both profiles are derived independently from the immutable source input_path.
@@ -262,16 +262,26 @@ async def process_dual_profile_audio(
             f"Speaker={speaker_output_path.name}, Manifest={manifest_dst.name}."
         )
         return True, None
-
     except Exception as e:
-        logger.error(f"Dual profile processing failed: {e}", exc_info=True)
-        # Fallback: create both via convert_to_wav
-        try:
-            ok_asr = await convert_to_wav(input_path, asr_output_path, denoise_mode=denoise_mode)
-            ok_spk = await convert_to_wav(input_path, speaker_output_path, denoise_mode="raw")
-            return (ok_asr and ok_spk), str(e) if not (ok_asr and ok_spk) else None
-        except Exception as e2:
-            return False, str(e2)
+        logger.exception("Failed during dual profile preprocessing")
+        return False, str(e)
+
+
+async def process_dual_profile_audio(
+    input_path: Path,
+    asr_output_path: Path,
+    speaker_output_path: Path,
+    denoise_mode: Optional[str] = None,
+) -> tuple[bool, Optional[str]]:
+    """Async wrapper that offloads heavy FFmpeg decoding to a worker thread."""
+    import asyncio
+    return await asyncio.to_thread(
+        process_dual_profile_audio_sync,
+        input_path,
+        asr_output_path,
+        speaker_output_path,
+        denoise_mode,
+    )
 
 
 def get_audio_duration(path: Path) -> float:

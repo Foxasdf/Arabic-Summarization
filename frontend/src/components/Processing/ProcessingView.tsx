@@ -24,6 +24,7 @@ export const ProcessingView: React.FC<ProcessingViewProps> = ({
 }) => {
   const { status, result, error, startTranscription, cancelTranscription } = useTranscription();
   const [maxProgress, setMaxProgress] = useState(0);
+  const currentStartedRef = React.useRef<string | null>(null);
 
   const asrLabel = 
     asrModel?.includes('cohere') ? 'Cohere Transcribe' :
@@ -49,9 +50,14 @@ export const ProcessingView: React.FC<ProcessingViewProps> = ({
   ];
 
   useEffect(() => {
-    startTranscription(fileId, numSpeakers, denoiseMode, asrModel);
+    if (currentStartedRef.current !== fileId) {
+      currentStartedRef.current = fileId;
+      startTranscription(fileId, numSpeakers, denoiseMode, asrModel);
+    }
     return () => {
-      cancelTranscription();
+      if (currentStartedRef.current === fileId) {
+        cancelTranscription();
+      }
     };
   }, [fileId, numSpeakers, denoiseMode, asrModel, startTranscription, cancelTranscription]);
 
@@ -89,6 +95,7 @@ export const ProcessingView: React.FC<ProcessingViewProps> = ({
             type="button"
             onClick={() => {
               setMaxProgress(0);
+              currentStartedRef.current = fileId;
               startTranscription(fileId, numSpeakers, denoiseMode, asrModel);
             }}
             className="bg-rose-600 hover:bg-rose-700 text-white px-6 py-2.5 rounded-xl font-medium transition-colors cursor-pointer text-sm shadow-sm"

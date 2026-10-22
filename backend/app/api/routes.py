@@ -201,9 +201,30 @@ async def transcribe_endpoint(
                 else:
                     denoise_label = ""
                 yield _sse({"step": "preprocessing", "progress": 3, "message": f"جاري تجهيز وتنقية الملف الصوتي{denoise_label}..."})
-                ok, err = await process_dual_profile_audio(source_file, wav_path, spk_wav_path, denoise_mode=denoise_mode)
-                if not ok:
-                    raise RuntimeError(f"فشل تحويل وتنقية الملف الصوتي (ffmpeg): {err or ''}")
+                
+                # Check if audio profiles were already converted and ready
+                reused = False
+                if wav_path.exists() and spk_wav_path.exists():
+                    try:
+                        if wav_path.stat().st_size > 1024 and spk_wav_path.stat().st_size > 1024:
+                            reused = True
+                            logger.info(f"Reusing existing preprocessed audio profiles for meeting {file_id}")
+                    except OSError:
+                        reused = False
+
+                if not reused:
+                    task = asyncio.create_task(
+                        process_dual_profile_audio(source_file, wav_path, spk_wav_path, denoise_mode=denoise_mode)
+                    )
+                    while not task.done():
+                        yield ": keepalive\n\n"
+                        try:
+                            await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+                        except asyncio.TimeoutError:
+                            yield ": keepalive\n\n"
+                    ok, err = task.result()
+                    if not ok:
+                        raise RuntimeError(f"فشل تحويل وتنقية الملف الصوتي (ffmpeg): {err or ''}")
                 yield _sse({"step": "preprocessing", "progress": 8, "message": "تم تحويل وتنقية وتجهيز مسارات الصوت بنجاح"})
 
                 backend_label = "Pyannote 3.1 (NVIDIA GPU)"
@@ -265,12 +286,10 @@ async def transcribe_endpoint(
             yield _sse({"step": "done", "progress": 100, "result": segments, "speakers": speakers})
         except asyncio.CancelledError:
             logger.warning(f"Transcription connection cancelled by client for meeting {file_id}")
-            _cleanup_temp_files()
             await save_meeting({"id": file_id, "status": "error"})
             raise
         except Exception as e:
             logger.exception("Transcription failed")
-            _cleanup_temp_files()
             await save_meeting({"id": file_id, "status": "error"})
             yield _sse({"error": str(e)})
         finally:

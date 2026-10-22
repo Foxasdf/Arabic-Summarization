@@ -68,7 +68,10 @@ export const api = {
       const url = qs ? `${API_BASE}/transcribe/${fileId}?${qs}` : `${API_BASE}/transcribe/${fileId}`;
       const eventSource = new EventSource(url);
 
+      let errorTimer: ReturnType<typeof setTimeout> | null = null;
+
       const abortHandler = () => {
+        if (errorTimer) clearTimeout(errorTimer);
         eventSource.close();
         reject(new Error('تم إلغاء عملية التفريغ'));
       };
@@ -78,13 +81,28 @@ export const api = {
       }
 
       const cleanup = () => {
+        if (errorTimer) {
+          clearTimeout(errorTimer);
+          errorTimer = null;
+        }
         if (signal) {
           signal.removeEventListener('abort', abortHandler);
         }
         eventSource.close();
       };
 
+      eventSource.onopen = () => {
+        if (errorTimer) {
+          clearTimeout(errorTimer);
+          errorTimer = null;
+        }
+      };
+
       eventSource.onmessage = (event) => {
+        if (errorTimer) {
+          clearTimeout(errorTimer);
+          errorTimer = null;
+        }
         try {
           const data: ProcessingStatus = JSON.parse(event.data);
           onProgress(data);
@@ -112,8 +130,25 @@ export const api = {
       };
 
       eventSource.onerror = () => {
-        cleanup();
-        reject(new Error('فشل أو انقطع الاتصال بخادم المعالجة'));
+        // If readyState is CONNECTING (0), browser is automatically attempting to reconnect
+        if (eventSource.readyState === EventSource.CONNECTING) {
+          if (!errorTimer) {
+            // Allow 60s grace period for heavy operations / network re-handshakes
+            errorTimer = setTimeout(() => {
+              if (eventSource.readyState !== EventSource.OPEN) {
+                cleanup();
+                reject(new Error('انقطع الاتصال بخادم المعالجة'));
+              }
+            }, 60000);
+          }
+          return;
+        }
+
+        if (eventSource.readyState === EventSource.CLOSED) {
+          if (errorTimer) clearTimeout(errorTimer);
+          cleanup();
+          reject(new Error('فشل أو انقطع الاتصال بخادم المعالجة'));
+        }
       };
     });
   },

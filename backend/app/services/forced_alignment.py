@@ -47,6 +47,7 @@ def _align_tokens_dp(target_words: List[str], ref_words: List[Any]) -> List[Tupl
     """
     Monotonic dynamic programming alignment between target tokens and acoustic reference tokens.
     Returns a list of (start, end) timestamp tuples for target_words.
+    Uses banded Sakoe-Chiba constraint when sequences are long to prevent O(N*M) quadratic CPU slowdown.
     """
     N = len(target_words)
     M = len(ref_words)
@@ -58,16 +59,31 @@ def _align_tokens_dp(target_words: List[str], ref_words: List[Any]) -> List[Tupl
     t_norm = [_normalize_token(w) for w in target_words]
     r_norm = [_normalize_token(getattr(w, "word", str(w))) for w in ref_words]
 
-    dp = np.zeros((N + 1, M + 1), dtype=np.float32)
-    for i in range(1, N + 1):
-        dp[i, 0] = dp[i - 1, 0] + 1.0
-    for j in range(1, M + 1):
-        dp[0, j] = dp[0, j - 1] + 1.0
+    use_band = max(N, M) > 300
+    window = max(100, int(0.06 * max(N, M))) if use_band else max(N, M)
+    scale = float(M) / float(max(1, N))
+
+    dp = np.full((N + 1, M + 1), float('inf'), dtype=np.float32)
+    dp[0, 0] = 0.0
+    for i in range(1, min(window + 1 if use_band else N + 1, N + 1)):
+        dp[i, 0] = float(i)
+    for j in range(1, min(window + 1 if use_band else M + 1, M + 1)):
+        dp[0, j] = float(j)
 
     for i in range(1, N + 1):
-        for j in range(1, M + 1):
-            cost = 0.0 if t_norm[i - 1] == r_norm[j - 1] else 1.0
-            if cost > 0 and (t_norm[i - 1].startswith(r_norm[j - 1]) or r_norm[j - 1].startswith(t_norm[i - 1])):
+        if use_band:
+            center_j = int(i * scale)
+            j_min = max(1, center_j - window)
+            j_max = min(M, center_j + window)
+        else:
+            j_min = 1
+            j_max = M
+
+        t_w = t_norm[i - 1]
+        for j in range(j_min, j_max + 1):
+            r_w = r_norm[j - 1]
+            cost = 0.0 if t_w == r_w else 1.0
+            if cost > 0 and (t_w.startswith(r_w) or r_w.startswith(t_w)):
                 cost = 0.3
             dp[i, j] = min(
                 dp[i - 1, j - 1] + cost,
