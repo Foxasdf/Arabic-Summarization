@@ -9,10 +9,20 @@ interface ProcessingViewProps {
   asrModel?: string;
   denoiseMode?: string;
   onComplete: () => void;
+  onError?: () => void;
+  onCancel?: () => void;
 }
 
-export const ProcessingView: React.FC<ProcessingViewProps> = ({ fileId, numSpeakers, asrModel, denoiseMode, onComplete }) => {
-  const { status, result, error, startTranscription } = useTranscription();
+export const ProcessingView: React.FC<ProcessingViewProps> = ({ 
+  fileId, 
+  numSpeakers, 
+  asrModel, 
+  denoiseMode, 
+  onComplete,
+  onError,
+  onCancel
+}) => {
+  const { status, result, error, startTranscription, cancelTranscription } = useTranscription();
   const [maxProgress, setMaxProgress] = useState(0);
 
   const asrLabel = 
@@ -40,13 +50,23 @@ export const ProcessingView: React.FC<ProcessingViewProps> = ({ fileId, numSpeak
 
   useEffect(() => {
     startTranscription(fileId, numSpeakers, denoiseMode, asrModel);
-  }, [fileId, numSpeakers, denoiseMode, asrModel, startTranscription]);
+    return () => {
+      cancelTranscription();
+    };
+  }, [fileId, numSpeakers, denoiseMode, asrModel, startTranscription, cancelTranscription]);
 
   useEffect(() => {
-    if (result) {
-      setTimeout(() => onComplete(), 1000);
+    if (result && result.length > 0) {
+      const timer = setTimeout(() => onComplete(), 1000);
+      return () => clearTimeout(timer);
     }
   }, [result, onComplete]);
+
+  useEffect(() => {
+    if (error && onError) {
+      onError();
+    }
+  }, [error, onError]);
 
   // Keep progress strictly monotonic so it never jumps backward
   const rawProgress = status?.progress || 0;
@@ -63,16 +83,28 @@ export const ProcessingView: React.FC<ProcessingViewProps> = ({ fileId, numSpeak
           <span className="text-3xl">⚠️</span>
         </div>
         <h3 className="text-xl font-bold mb-2">حدث خطأ أثناء المعالجة</h3>
-        <p>{error}</p>
-        <button 
-          onClick={() => {
-            setMaxProgress(0);
-            startTranscription(fileId, numSpeakers, denoiseMode, asrModel);
-          }}
-          className="mt-6 bg-rose-600 hover:bg-rose-700 text-white px-6 py-2 rounded-lg font-medium transition-colors cursor-pointer"
-        >
-          إعادة المحاولة
-        </button>
+        <p className="text-sm text-rose-600 mb-6 max-w-md mx-auto whitespace-pre-wrap">{error}</p>
+        <div className="flex items-center justify-center gap-3">
+          <button 
+            type="button"
+            onClick={() => {
+              setMaxProgress(0);
+              startTranscription(fileId, numSpeakers, denoiseMode, asrModel);
+            }}
+            className="bg-rose-600 hover:bg-rose-700 text-white px-6 py-2.5 rounded-xl font-medium transition-colors cursor-pointer text-sm shadow-sm"
+          >
+            إعادة المحاولة
+          </button>
+          {onCancel && (
+            <button 
+              type="button"
+              onClick={onCancel}
+              className="bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 px-5 py-2.5 rounded-xl font-medium transition-colors cursor-pointer text-sm"
+            >
+              العودة للرئيسية
+            </button>
+          )}
+        </div>
       </div>
     );
   }

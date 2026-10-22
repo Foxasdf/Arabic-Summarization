@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { api } from '../services/api';
 import { ProcessingStatus, TranscriptSegment } from '../types';
 
@@ -7,6 +7,15 @@ export function useTranscription() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<TranscriptSegment[] | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  const cancelTranscription = useCallback(() => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setIsProcessing(false);
+  }, []);
 
   const startTranscription = useCallback(async (
     fileId: string,
@@ -14,6 +23,14 @@ export function useTranscription() {
     denoiseMode?: string,
     asrModel?: string
   ) => {
+    // Abort any previous pending transcription request
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     setIsProcessing(true);
     setError(null);
     setStatus(null);
@@ -23,18 +40,37 @@ export function useTranscription() {
       const meetingResult = await api.transcribe(
         fileId,
         (newStatus) => {
-          setStatus(newStatus);
+          if (!controller.signal.aborted) {
+            setStatus(newStatus);
+          }
         },
         numSpeakers,
         denoiseMode,
-        asrModel
+        asrModel,
+        controller.signal
       );
-      setResult(meetingResult);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'حدث خطأ غير معروف');
+      if (!controller.signal.aborted) {
+        setResult(meetingResult);
+      }
+    } catch (err: any) {
+      if (!controller.signal.aborted) {
+        setError(err instanceof Error ? err.message : 'حدث خطأ غير معروف أثناء التفريغ');
+      }
     } finally {
-      setIsProcessing(false);
+      if (abortControllerRef.current === controller) {
+        setIsProcessing(false);
+        abortControllerRef.current = null;
+      }
     }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+        abortControllerRef.current = null;
+      }
+    };
   }, []);
 
   return {
@@ -43,5 +79,6 @@ export function useTranscription() {
     error,
     result,
     startTranscription,
+    cancelTranscription,
   };
 }

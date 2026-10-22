@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Trash2 } from 'lucide-react';
+import { Trash2, RefreshCw } from 'lucide-react';
 import { AppView, MainTab, Meeting } from './types';
 import { Header } from './components/Layout/Header';
 import { Sidebar } from './components/Layout/Sidebar';
@@ -69,7 +69,13 @@ function App() {
       setCurrentMeeting(null);
     }
     setCurrentMeetingId(id);
-    setView('meeting');
+    const m = meetings.find((item) => item.id === id);
+    if (m && m.status === 'processing') {
+      setFileId(id);
+      setView('processing');
+    } else {
+      setView('meeting');
+    }
   };
 
   const handleFileSelect = (file: File) => {
@@ -90,7 +96,9 @@ function App() {
         setUploadProgress(percent);
       });
       setFileId(res.file_id);
+      setCurrentMeetingId(res.file_id);
       setView('processing');
+      fetchMeetings();
     } catch (error: any) {
       console.error("Upload failed", error);
       alert(error?.message || "فشل رفع الملف، يرجى المحاولة مرة أخرى.");
@@ -105,6 +113,10 @@ function App() {
     setSelectedFile(null);
     setIsUploading(false);
     setUploadProgress(0);
+  };
+
+  const handleTranscriptionError = () => {
+    fetchMeetings();
   };
 
   const handleTranscriptionComplete = async () => {
@@ -223,6 +235,8 @@ function App() {
                     asrModel={selectedAsrModel}
                     denoiseMode={selectedDenoiseMode}
                     onComplete={handleTranscriptionComplete} 
+                    onError={handleTranscriptionError}
+                    onCancel={handleNewMeeting}
                   />
                 </div>
               )}
@@ -248,6 +262,56 @@ function App() {
                       </button>
                     </div>
                   </div>
+
+                  {(!currentMeeting.transcript || currentMeeting.transcript.length === 0) && (
+                    currentMeeting.status === 'processing' ? (
+                      <div className="bg-amber-50 border border-amber-200 rounded-2xl p-8 text-center text-amber-800 animate-in fade-in">
+                        <div className="w-16 h-16 bg-amber-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                          <RefreshCw className="w-8 h-8 text-amber-600 animate-spin" />
+                        </div>
+                        <h3 className="text-xl font-bold mb-2">جاري تفريغ ومعالجة هذا الاجتماع...</h3>
+                        <p className="text-sm text-amber-700 mb-6 max-w-md mx-auto">
+                          يتم الآن فصل المتحدثين وتفريغ الصوت في الخلفية. يمكنك متابعة شاشة التقدم المباشرة أدناه.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setFileId(currentMeeting.id);
+                            setView('processing');
+                          }}
+                          className="bg-amber-600 hover:bg-amber-700 text-white px-6 py-2.5 rounded-xl font-medium transition-colors cursor-pointer text-sm shadow-sm inline-flex items-center gap-2"
+                        >
+                          <RefreshCw className="w-4 h-4" />
+                          <span>فتح شاشة التقدم المباشر</span>
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="bg-rose-50 border border-rose-200 rounded-2xl p-8 text-center text-rose-700 animate-in fade-in">
+                        <div className="w-16 h-16 bg-rose-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                          <span className="text-3xl">⚠️</span>
+                        </div>
+                        <h3 className="text-xl font-bold mb-2">
+                          {currentMeeting.status === 'error' ? 'فشلت عملية التفريغ لهذا الاجتماع' : 'لا يتوفر تفريغ نصي لهذا الاجتماع'}
+                        </h3>
+                        <p className="text-sm text-rose-600 mb-6 max-w-md mx-auto">
+                          {currentMeeting.status === 'error'
+                            ? 'حدث خطأ أثناء تفريغ هذا الملف الصوتي. يمكنك الضغط على الزر أدناه لإعادة محاولة التفريغ بأمان.'
+                            : 'لم يتم العثور على أي نصوص أو مقاطع كلامية لهذا الاجتماع.'}
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setFileId(currentMeeting.id);
+                            setView('processing');
+                          }}
+                          className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-2.5 rounded-xl font-medium transition-colors cursor-pointer text-sm shadow-sm inline-flex items-center gap-2"
+                        >
+                          <RefreshCw className="w-4 h-4" />
+                          <span>إعادة محاولة التفريغ الآن</span>
+                        </button>
+                      </div>
+                    )
+                  )}
 
                   {currentMeeting.summary && (
                     <>

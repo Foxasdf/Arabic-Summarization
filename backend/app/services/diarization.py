@@ -15,11 +15,15 @@ Fallback backend:
     Dependency-light (numpy + scipy only) statistical clustering diarizer
     ensuring zero-failure under any edge case.
 """
+import os
 from pathlib import Path
 import logging
 import yaml
 import urllib.request
 from typing import Any, List, Dict, Optional, Callable
+
+# Prevent PyTorch CUDA memory fragmentation
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import numpy as np
 
@@ -121,6 +125,9 @@ def diarize(
         if not turns:
             raise RuntimeError("لم يتمكن نموذج Pyannote 3.1 من اكتشاف أي مقاطع للمتحدثين في التسجيل الصوتي.")
         return _normalize_turns(turns)
+    except InterruptedError:
+        logger.info("Pyannote diarization was cancelled/interrupted.")
+        raise
     except Exception as e:
         logger.exception(f"Pyannote diarization failed: {e}")
         raise RuntimeError(f"فشل فصل المتحدثين: نموذج Pyannote 3.1 هو المحرك الوحيد المعتمد وحدث خطأ أثناء تشغيله: {e}")
@@ -254,6 +261,8 @@ def _diarize_pyannote_local(
         if on_progress:
             try:
                 on_progress(pct, msg)
+            except (InterruptedError, asyncio.CancelledError):
+                raise
             except Exception:
                 pass
 
@@ -263,6 +272,11 @@ def _diarize_pyannote_local(
 
     # Dynamic batch sizes scaled to current hardware profile
     hw = get_hardware_profile()
+    if hw.use_gpu and torch.cuda.is_available():
+        try:
+            pipeline.to(torch.device("cuda:0"))
+        except Exception:
+            pass
     d_params = hw.diarization_params()
     seg_batch = d_params["segmentation_batch_size"]
     emb_batch = d_params["embedding_batch_size"]
@@ -314,11 +328,93 @@ def _diarize_pyannote_local(
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    logger.info(
-        f"Executing Pyannote diarization on GPU (seg_batch={seg_batch}, emb_batch={emb_batch})..."
-    )
-    with torch.inference_mode():
-        result = pipeline(io_input, **kwargs)
+    candidate_batches = [
+        (seg_batch, emb_batch),
+        (min(seg_batch, 32), min(emb_batch, 16)),
+        (16, 8),
+        (4, 4),
+    ]
+    seen_batches = set()
+    batches_to_try = []
+    for sb, eb in candidate_batches:
+        if (sb, eb) not in seen_batches:
+            seen_batches.add((sb, eb))
+            batches_to_try.append((sb, eb))
+
+    result = None
+    last_err = None
+
+    for cur_seg, cur_emb in batches_to_try:
+        pipeline.segmentation_batch_size = cur_seg
+        pipeline.embedding_batch_size = cur_emb
+        if hasattr(pipeline, "_segmentation") and hasattr(pipeline._segmentation, "batch_size"):
+            pipeline._segmentation.batch_size = cur_seg
+        if hasattr(pipeline, "_embedding") and hasattr(pipeline._embedding, "batch_size"):
+            pipeline._embedding.batch_size = cur_emb
+
+        if torch.cuda.is_available():
+            gc.collect()
+            torch.cuda.empty_cache()
+
+        logger.info(
+            f"Executing Pyannote diarization on GPU (seg_batch={cur_seg}, emb_batch={cur_emb})..."
+        )
+        try:
+            with torch.inference_mode():
+                result = pipeline(io_input, **kwargs)
+            break
+        except Exception as err:
+            if isinstance(err, (InterruptedError, asyncio.CancelledError)):
+                raise
+            err_msg = str(err).lower()
+            is_oom = isinstance(err, (MemoryError,)) or any(
+                w in err_msg for w in ["cuda out of memory", "out of memory", "batch_size", "cudacachingallocator"]
+            )
+            if is_oom:
+                logger.warning(
+                    f"Pyannote diarization hit GPU memory limit with seg_batch={cur_seg}, emb_batch={cur_emb} ({err}). "
+                    "Reducing batch size..."
+                )
+                last_err = err
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                continue
+            else:
+                raise
+
+    # If all GPU batch sizes failed with OOM, fallback to CPU execution
+    if result is None:
+        logger.warning(f"All GPU batch sizes failed for Pyannote ({last_err}). Falling back to CPU diarization...")
+        _safe_progress(12, "جاري تحويل فصل المتحدثين إلى المعالج (CPU) لتفادي نفاد ذاكرة كرت الشاشة...")
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        try:
+            cpu_device = torch.device("cpu")
+            pipeline.to(cpu_device)
+            pipeline.segmentation_batch_size = 16
+            pipeline.embedding_batch_size = 16
+            if hasattr(pipeline, "_segmentation") and hasattr(pipeline._segmentation, "batch_size"):
+                pipeline._segmentation.batch_size = 16
+            if hasattr(pipeline, "_embedding") and hasattr(pipeline._embedding, "batch_size"):
+                pipeline._embedding.batch_size = 16
+            io_input_cpu = {
+                "waveform": torch.from_numpy(audio_data).unsqueeze(0).to(cpu_device),
+                "sample_rate": SR
+            }
+            with torch.inference_mode():
+                result = pipeline(io_input_cpu, **kwargs)
+        except Exception as err:
+            if isinstance(err, (InterruptedError, asyncio.CancelledError)):
+                raise
+            raise RuntimeError(f"فشل تشغيل Pyannote على GPU و CPU بسبب نفاد الذاكرة: {last_err or err}")
+        finally:
+            if torch.cuda.is_available():
+                try:
+                    pipeline.to(torch.device("cuda:0"))
+                except Exception:
+                    pass
 
     # Prefer speaker_diarization to retain overlapping speech, backchannels, and rapid conversational interjections
     annotation = getattr(result, "speaker_diarization", result)

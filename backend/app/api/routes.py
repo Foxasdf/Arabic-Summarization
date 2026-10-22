@@ -3,6 +3,8 @@ import json
 import time
 import asyncio
 import logging
+import shutil
+import threading
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -40,6 +42,7 @@ router = APIRouter()
 
 # Only one heavy model job at a time – prevents two GGUFs being loaded together on small machines.
 _model_lock = asyncio.Lock()
+_active_transcriptions = set()
 
 
 def default_speaker_name(speaker_id: str) -> str:
@@ -57,8 +60,11 @@ async def _run_with_progress(func, *args, **kwargs):
     """Run blocking `func(*args, on_progress=cb, **kwargs)` in a thread, yielding (pct,msg) events then ('result', value)."""
     loop = asyncio.get_running_loop()
     q: asyncio.Queue = asyncio.Queue()
+    cancel_event = threading.Event()
 
     def cb(pct, msg):
+        if cancel_event.is_set():
+            raise InterruptedError("Cancelled by client")
         loop.call_soon_threadsafe(q.put_nowait, ("progress", (pct, msg)))
 
     def worker():
@@ -67,20 +73,32 @@ async def _run_with_progress(func, *args, **kwargs):
                 res = func(*args, on_progress=cb, **kwargs)
             except TypeError:
                 res = func(*args, cb, **kwargs)
-            loop.call_soon_threadsafe(q.put_nowait, ("result", res))
-        except Exception as e:  # noqa
-            logger.exception("Background job failed")
-            loop.call_soon_threadsafe(q.put_nowait, ("error", e))
-
-    loop.run_in_executor(None, worker)
-    while True:
-        try:
-            kind, val = await asyncio.wait_for(q.get(), timeout=10.0)
-            yield kind, val
-            if kind in ("result", "error"):
+            if cancel_event.is_set():
                 return
-        except asyncio.TimeoutError:
-            yield "heartbeat", None
+            loop.call_soon_threadsafe(q.put_nowait, ("result", res))
+        except InterruptedError:
+            logger.info("Worker thread observed cancellation and stopped cleanly")
+        except Exception as e:
+            if not cancel_event.is_set():
+                logger.exception("Background job failed")
+                loop.call_soon_threadsafe(q.put_nowait, ("error", e))
+
+    fut = loop.run_in_executor(None, worker)
+    try:
+        while True:
+            try:
+                kind, val = await asyncio.wait_for(q.get(), timeout=10.0)
+                yield kind, val
+                if kind in ("result", "error"):
+                    return
+            except asyncio.TimeoutError:
+                yield "heartbeat", None
+    finally:
+        cancel_event.set()
+        try:
+            await asyncio.wait_for(asyncio.shield(fut), timeout=4.0)
+        except Exception:
+            pass
 
 
 @router.post("/upload", response_model=UploadResponse)
@@ -110,14 +128,56 @@ async def transcribe_endpoint(
         raise HTTPException(status_code=404, detail="Meeting not found")
 
     async def event_generator():
+        wav_path = settings.UPLOAD_DIR / f"{file_id}.16k.wav"
+        spk_wav_path = settings.UPLOAD_DIR / f"{file_id}.speaker.16k.wav"
+        job_dir = settings.UPLOAD_DIR / f".dual_{file_id}.16k"
+
+        def _cleanup_temp_files():
+            for p in (wav_path, spk_wav_path):
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if job_dir.exists():
+                shutil.rmtree(job_dir, ignore_errors=True)
+
+        # Allow grace period in case a previous connection for this file is currently cancelling/unwinding
+        for _ in range(10):
+            if file_id not in _active_transcriptions:
+                break
+            await asyncio.sleep(0.2)
+
+        if file_id in _active_transcriptions:
+            logger.warning(f"Transcription already active for file {file_id}, rejecting duplicate concurrent request")
+            yield _sse({"error": "عملية التفريغ قيد التنفيذ بالفعل لهذا الاجتماع في الخلفية"})
+            return
+
+        _active_transcriptions.add(file_id)
+        # Immediately record status as processing in DB
+        await save_meeting({"id": file_id, "status": "processing"})
+
         try:
-            files = [f for f in settings.UPLOAD_DIR.glob(f"{file_id}.*") if not f.name.endswith(".wav")] \
-                or list(settings.UPLOAD_DIR.glob(f"{file_id}.*"))
-            if not files:
-                yield _sse({"error": "File not found"})
-                return
-            wav_path = settings.UPLOAD_DIR / f"{file_id}.16k.wav"
-            spk_wav_path = settings.UPLOAD_DIR / f"{file_id}.speaker.16k.wav"
+            # Safely locate the original uploaded audio file
+            orig_name = meeting.get("filename") or ""
+            orig_ext = Path(orig_name).suffix.lower()
+            candidate = settings.UPLOAD_DIR / f"{file_id}{orig_ext}" if orig_ext else None
+            if candidate and candidate.exists():
+                source_file = candidate
+            else:
+                files = [
+                    f for f in settings.UPLOAD_DIR.glob(f"{file_id}.*")
+                    if not (
+                        f.name.endswith(".16k.wav")
+                        or f.name.endswith(".speaker.16k.wav")
+                        or f.name.endswith(".manifest.json")
+                        or f.name.startswith(".dual_")
+                    )
+                ]
+                if not files:
+                    await save_meeting({"id": file_id, "status": "error"})
+                    yield _sse({"error": "ملف الصوت الأصلي غير موجود على الخادم"})
+                    return
+                source_file = files[0]
 
             async with _model_lock:
                 denoise_names = {
@@ -141,7 +201,7 @@ async def transcribe_endpoint(
                 else:
                     denoise_label = ""
                 yield _sse({"step": "preprocessing", "progress": 3, "message": f"جاري تجهيز وتنقية الملف الصوتي{denoise_label}..."})
-                ok, err = await process_dual_profile_audio(files[0], wav_path, spk_wav_path, denoise_mode=denoise_mode)
+                ok, err = await process_dual_profile_audio(source_file, wav_path, spk_wav_path, denoise_mode=denoise_mode)
                 if not ok:
                     raise RuntimeError(f"فشل تحويل وتنقية الملف الصوتي (ffmpeg): {err or ''}")
                 yield _sse({"step": "preprocessing", "progress": 8, "message": "تم تحويل وتنقية وتجهيز مسارات الصوت بنجاح"})
@@ -194,28 +254,27 @@ async def transcribe_endpoint(
                         segments = val
 
                 if not segments:
-                    segments = []
+                    raise RuntimeError("لم يتم استخراج أي نصوص مفرغة من الملف الصوتي (قد يكون الملف فارغاً أو يحتوي على ضوضاء فقط)")
 
             yield _sse({"step": "alignment", "progress": 97, "message": "جاري حفظ نتائج التفريغ..."})
             old = meeting.get("speakers_json") or {}
             speakers = {s["speaker"]: old.get(s["speaker"], default_speaker_name(s["speaker"])) for s in segments}
             await save_meeting({"id": file_id, "transcript_json": segments, "diarization_json": turns,
                                 "speakers_json": speakers, "status": "transcribed"})
-            for p in (wav_path, spk_wav_path):
-                try:
-                    p.unlink(missing_ok=True)
-                except OSError:
-                    pass
+            _cleanup_temp_files()
             yield _sse({"step": "done", "progress": 100, "result": segments, "speakers": speakers})
+        except asyncio.CancelledError:
+            logger.warning(f"Transcription connection cancelled by client for meeting {file_id}")
+            _cleanup_temp_files()
+            await save_meeting({"id": file_id, "status": "error"})
+            raise
         except Exception as e:
             logger.exception("Transcription failed")
-            for p in (wav_path, spk_wav_path):
-                try:
-                    p.unlink(missing_ok=True)
-                except OSError:
-                    pass
+            _cleanup_temp_files()
             await save_meeting({"id": file_id, "status": "error"})
             yield _sse({"error": str(e)})
+        finally:
+            _active_transcriptions.discard(file_id)
 
     return StreamingResponse(
         event_generator(),

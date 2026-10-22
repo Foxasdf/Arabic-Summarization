@@ -78,6 +78,47 @@ class TestStorage(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(meetings_after), 1)
         self.assertEqual(meetings_after[0]["id"], "m2")
 
+    async def test_init_db_cleans_corrupt_transcribed_and_stale_processing(self):
+        # Save a meeting falsely marked as 'transcribed' with empty transcript
+        await save_meeting({"id": "corrupt-1", "filename": "c1.wav", "status": "transcribed", "transcript_json": []})
+        # Save a meeting that was in-flight when server stopped
+        await save_meeting({"id": "processing-1", "filename": "p1.wav", "status": "processing"})
+        # Save a legitimate transcribed meeting
+        await save_meeting({
+            "id": "valid-1",
+            "filename": "v1.wav",
+            "status": "transcribed",
+            "transcript_json": [{"speaker": "SPEAKER_00", "text": "مرحبا", "start": 0.0, "end": 1.0}]
+        })
+
+        # Run init_db again to trigger cleanup migration
+        await init_db()
+
+        c1 = await get_meeting("corrupt-1")
+        self.assertEqual(c1["status"], "error")
+
+        p1 = await get_meeting("processing-1")
+        self.assertEqual(p1["status"], "error")
+
+        v1 = await get_meeting("valid-1")
+        self.assertEqual(v1["status"], "transcribed")
+
+    async def test_save_meeting_refuses_transcribed_without_transcript(self):
+        # Attempt to save a meeting as transcribed with empty transcript list
+        await save_meeting({
+            "id": "guard-1",
+            "filename": "g1.wav",
+            "status": "transcribed",
+            "transcript_json": []
+        })
+        m = await get_meeting("guard-1")
+        self.assertEqual(m["status"], "error")
+
+        # In list_meetings, it should also be reported as error
+        meetings = await list_meetings()
+        guard_item = next(x for x in meetings if x["id"] == "guard-1")
+        self.assertEqual(guard_item["status"], "error")
+
 
 if __name__ == "__main__":
     unittest.main()

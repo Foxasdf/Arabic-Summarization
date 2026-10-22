@@ -8,7 +8,10 @@ build actually supports GPU offload, then derives safe runtime parameters
 import os
 import sys
 import shutil
-import ctypes
+try:
+    import ctypes
+except Exception:
+    ctypes = None
 import logging
 import subprocess
 from dataclasses import dataclass, asdict
@@ -28,7 +31,7 @@ def _ram_gb() -> tuple[float, float]:
         return vm.total / 1024**3, vm.available / 1024**3
     except Exception:
         pass
-    if sys.platform.startswith("win"):
+    if sys.platform.startswith("win") and ctypes is not None:
         class MEMORYSTATUSEX(ctypes.Structure):
             _fields_ = [
                 ("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
@@ -141,23 +144,32 @@ class HardwareProfile:
             emb_batch = max(16, seg_batch // 2)
         elif not self.use_gpu:
             seg_batch = 32
-            emb_batch = 32
+            emb_batch = 16
         elif self.vram_total_gb >= 15.0:
             # 24GB GPUs (RTX 3090, 4090, A10G)
-            seg_batch = 256
-            emb_batch = 128
+            seg_batch = 128
+            emb_batch = 64
         elif self.vram_total_gb >= 10.0:
             # 11GB - 12GB GPUs (RTX 2080 Ti, RTX 3060 12GB, RTX 3080)
-            seg_batch = 192
-            emb_batch = 96
+            seg_batch = 64
+            emb_batch = 32
         elif self.vram_total_gb >= 7.5:
             # 8GB GPUs (RTX 2070, RTX 2080, RTX 3070)
-            seg_batch = 96
-            emb_batch = 48
+            seg_batch = 48
+            emb_batch = 24
         else:
             # Low VRAM (<= 6GB)
             seg_batch = 32
-            emb_batch = 32
+            emb_batch = 16
+
+        # Dynamic headroom safety check based on current live available VRAM
+        if self.use_gpu:
+            if self.vram_free_gb < 2.0:
+                seg_batch = min(seg_batch, 16)
+                emb_batch = min(emb_batch, 8)
+            elif self.vram_free_gb < 4.0:
+                seg_batch = min(seg_batch, 32)
+                emb_batch = min(emb_batch, 16)
 
         return {
             "segmentation_batch_size": seg_batch,

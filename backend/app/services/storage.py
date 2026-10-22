@@ -66,6 +66,17 @@ def _sync_init_db():
                         logger.debug(f"Could not migrate meeting {m_id}: {ex}")
         except Exception as e:
             logger.debug(f"DB migration error during segment consolidation: {e}")
+
+        # Data cleanup: fix any meetings previously mislabeled as 'transcribed' with empty transcripts
+        # and reset stale 'processing' statuses from previous server restarts
+        try:
+            conn.execute(
+                "UPDATE meetings SET status = 'error' "
+                "WHERE status = 'transcribed' AND (transcript_json IS NULL OR TRIM(transcript_json) IN ('', '[]', 'null'))"
+            )
+            conn.execute("UPDATE meetings SET status = 'error' WHERE status = 'processing'")
+        except Exception as e:
+            logger.debug(f"DB cleanup error: {e}")
     conn.close()
 
 
@@ -84,6 +95,10 @@ def _row_to_dict(row) -> Dict:
         except Exception:
             pass
 
+    # Safeguard: never expose 'transcribed' status if transcript is empty
+    if res.get("status") == "transcribed" and not res.get("transcript_json"):
+        res["status"] = "error"
+
     return res
 
 
@@ -96,6 +111,13 @@ def _sync_save_meeting(data: dict) -> str:
             fields["transcript_json"] = merge_consecutive_speaker_segments(fields["transcript_json"])
         except Exception:
             pass
+
+    # Safeguard: prevent saving status 'transcribed' when transcript is empty/missing
+    if fields.get("status") == "transcribed":
+        t = fields.get("transcript_json")
+        if not t or (isinstance(t, (list, str)) and (t == [] or t in ('', '[]', 'null'))):
+            fields["status"] = "error"
+
     for f in _JSON_FIELDS:
         if f in fields:
             fields[f] = json.dumps(fields[f], ensure_ascii=False)
@@ -123,10 +145,18 @@ def _sync_get_meeting(meeting_id: str) -> Optional[Dict]:
 def _sync_list_meetings() -> List[Dict]:
     conn = _connect()
     rows = conn.execute(
-        "SELECT id, filename, upload_time, duration_seconds, status FROM meetings ORDER BY upload_time DESC"
+        "SELECT id, filename, upload_time, duration_seconds, status, transcript_json FROM meetings ORDER BY upload_time DESC"
     ).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    meetings = []
+    for r in rows:
+        d = dict(r)
+        tj = d.pop("transcript_json", None)
+        if d.get("status") == "transcribed":
+            if not tj or tj.strip() in ("", "[]", "null"):
+                d["status"] = "error"
+        meetings.append(d)
+    return meetings
 
 
 def _sync_delete_meeting(meeting_id: str):

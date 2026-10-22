@@ -52,9 +52,14 @@ export const api = {
     onProgress: (status: ProcessingStatus) => void,
     numSpeakers?: number,
     denoiseMode?: string,
-    asrModel?: string
+    asrModel?: string,
+    signal?: AbortSignal
   ): Promise<TranscriptSegment[]> {
     return new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        return reject(new Error('تم إلغاء عملية التفريغ'));
+      }
+
       const params = new URLSearchParams();
       if (numSpeakers) params.append('num_speakers', numSpeakers.toString());
       if (denoiseMode) params.append('denoise_mode', denoiseMode);
@@ -62,49 +67,53 @@ export const api = {
       const qs = params.toString();
       const url = qs ? `${API_BASE}/transcribe/${fileId}?${qs}` : `${API_BASE}/transcribe/${fileId}`;
       const eventSource = new EventSource(url);
-      
-      let errorTimer: ReturnType<typeof setTimeout> | null = null;
+
+      const abortHandler = () => {
+        eventSource.close();
+        reject(new Error('تم إلغاء عملية التفريغ'));
+      };
+
+      if (signal) {
+        signal.addEventListener('abort', abortHandler, { once: true });
+      }
+
+      const cleanup = () => {
+        if (signal) {
+          signal.removeEventListener('abort', abortHandler);
+        }
+        eventSource.close();
+      };
 
       eventSource.onmessage = (event) => {
-        if (errorTimer) {
-          clearTimeout(errorTimer);
-          errorTimer = null;
-        }
         try {
           const data: ProcessingStatus = JSON.parse(event.data);
           onProgress(data);
-          
-          // Backend sends step: 'done' when complete
-          if (data.step === 'done' && data.result) {
-            eventSource.close();
-            resolve(data.result);
-          }
 
           // Handle errors sent via SSE
           if (data.error) {
-            eventSource.close();
+            cleanup();
             reject(new Error(data.error));
+            return;
+          }
+
+          // Backend sends step: 'done' when complete
+          if (data.step === 'done') {
+            cleanup();
+            if (data.result && data.result.length > 0) {
+              resolve(data.result);
+            } else {
+              reject(new Error('لم يتم استخراج أي نصوص مفرغة من الملف الصوتي'));
+            }
+            return;
           }
         } catch (err) {
           console.error('Failed to parse SSE data', err);
         }
       };
-      
+
       eventSource.onerror = () => {
-        if (eventSource.readyState === EventSource.CONNECTING) {
-          if (!errorTimer) {
-            errorTimer = setTimeout(() => {
-              if (eventSource.readyState !== EventSource.OPEN) {
-                eventSource.close();
-                reject(new Error('انقطع الاتصال بخادم المعالجة'));
-              }
-            }, 15000);
-          }
-          return;
-        }
-        if (errorTimer) clearTimeout(errorTimer);
-        eventSource.close();
-        reject(new Error('فشل الاتصال بخادم المعالجة'));
+        cleanup();
+        reject(new Error('فشل أو انقطع الاتصال بخادم المعالجة'));
       };
     });
   },

@@ -5,7 +5,10 @@ Uses the official model prompt and incorporates dynamic max_tokens and explicit 
 import os
 import re
 import logging
-import ctypes
+try:
+    import ctypes
+except Exception:
+    ctypes = None
 from pathlib import Path
 from typing import Optional
 

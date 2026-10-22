@@ -17,6 +17,7 @@ services:
       - ./models:/app/models
       - ./backend/uploads:/app/uploads
       - ./backend/data:/app/data
+      - ./backend/app:/app/app
     environment:
       - MEETING_HOST=0.0.0.0
       - MEETING_PORT=3011
@@ -27,6 +28,7 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
       - HF_TOKEN=REDACTED_HF_TOKEN
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
     restart: unless-stopped
 
   frontend:

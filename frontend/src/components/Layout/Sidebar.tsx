@@ -27,15 +27,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const getStatusIcon = (status: string) => {
     switch (status) {
       case 'uploaded':
-        return <Upload className="w-4 h-4 text-slate-400" />;
+        return <Upload className="w-3.5 h-3.5 text-slate-400" />;
       case 'processing':
-        return <RefreshCw className="w-4 h-4 text-amber-500 animate-spin" />;
+        return <RefreshCw className="w-3.5 h-3.5 text-amber-500 animate-spin" />;
       case 'transcribed':
-        return <FileText className="w-4 h-4 text-blue-500" />;
+        return <FileText className="w-3.5 h-3.5 text-blue-500" />;
       case 'completed':
-        return <CheckCircle className="w-4 h-4 text-emerald-500" />;
+        return <CheckCircle className="w-3.5 h-3.5 text-emerald-500" />;
       case 'error':
-        return <AlertCircle className="w-4 h-4 text-rose-500" />;
+        return <AlertCircle className="w-3.5 h-3.5 text-rose-500" />;
       default:
         return null;
     }
@@ -47,8 +47,25 @@ export const Sidebar: React.FC<SidebarProps> = ({
       case 'processing': return 'جاري المعالجة';
       case 'transcribed': return 'تم التفريغ';
       case 'completed': return 'تم التلخيص';
-      case 'error': return 'خطأ';
+      case 'error': return 'فشل التفريغ';
       default: return status;
+    }
+  };
+
+  const getStatusBadgeClass = (status: string) => {
+    switch (status) {
+      case 'uploaded':
+        return 'bg-slate-50 text-slate-600 border-slate-200';
+      case 'processing':
+        return 'bg-amber-50 text-amber-700 border-amber-200 animate-pulse';
+      case 'transcribed':
+        return 'bg-blue-50 text-blue-700 border-blue-200';
+      case 'completed':
+        return 'bg-emerald-50 text-emerald-700 border-emerald-200';
+      case 'error':
+        return 'bg-rose-50 text-rose-700 border-rose-200';
+      default:
+        return 'bg-slate-50 text-slate-600 border-slate-200';
     }
   };
 
@@ -150,9 +167,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 <div className="text-xs text-slate-400">
                   {formatDate(meeting.upload_time)}
                 </div>
-                <div className="flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 bg-slate-50 rounded-md border border-slate-100">
+                <div className={`flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-md border ${getStatusBadgeClass(meeting.status)}`}>
                   {getStatusIcon(meeting.status)}
-                  <span className="text-slate-600">{getStatusText(meeting.status)}</span>
+                  <span>{getStatusText(meeting.status)}</span>
                 </div>
               </div>
             </div>
