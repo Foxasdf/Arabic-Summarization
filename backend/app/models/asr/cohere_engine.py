@@ -171,6 +171,10 @@ class CohereASREngine(BaseASREngine):
                         f"Cohere Transcribe Arabic worker ready using backend='{actual_backend}' "
                         f"(threads={worker_threads}, gpu={is_gpu}{dev_info})."
                     )
+                    if not is_gpu:
+                        skipped = "".join(self._stderr_buffer).strip()
+                        if skipped:
+                            logger.warning(f"Cohere worker fell back to CPU. GPU backend errors:\n{skipped}")
                     break
                 else:
                     last_error = resp.get("message", "Unknown worker error")

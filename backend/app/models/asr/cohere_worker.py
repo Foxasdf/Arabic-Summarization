@@ -24,46 +24,73 @@ if hasattr(sys.stdin, "reconfigure"):
 def _ensure_linux_nvidia_vulkan_icd() -> None:
     """
     In slim Linux Docker containers with NVIDIA GPUs, nvidia-container-toolkit
-    mounts libGLX_nvidia.so.0 / libnvidia-glcore.so, but /etc/vulkan/icd.d/nvidia_icd.json
-    may be absent. Create a temporary ICD descriptor in /tmp if needed so ggml-vulkan
-    can discover the NVIDIA GPU.
+    mounts NVIDIA libraries into /usr/lib/x86_64-linux-gnu or /usr/local/nvidia/lib64,
+    but /etc/vulkan/icd.d/nvidia_icd.json may be absent. Create a temporary ICD
+    descriptor in /tmp pointing to libGLX_nvidia so ggml-vulkan can discover the NVIDIA GPU.
     """
     if not sys.platform.startswith("linux"):
         return
-    if os.environ.get("VK_ICD_FILENAMES") or os.environ.get("VK_DRIVER_FILES"):
-        return
+
+    # Check for existing valid ICD manifests
     standard_icds = [
         Path("/etc/vulkan/icd.d/nvidia_icd.json"),
         Path("/usr/share/vulkan/icd.d/nvidia_icd.json"),
+        Path("/etc/vulkan/icd.d"),
+        Path("/usr/share/vulkan/icd.d"),
     ]
+    found_existing = False
     for p in standard_icds:
         if p.is_file():
-            return
-    lib_candidates = [
-        Path("/usr/lib/x86_64-linux-gnu/libGLX_nvidia.so.0"),
-        Path("/usr/lib/x86_64-linux-gnu/libnvidia-glcore.so"),
-        Path("/usr/lib64/libGLX_nvidia.so.0"),
+            found_existing = True
+            break
+        elif p.is_dir() and any(p.glob("*.json")):
+            found_existing = True
+            break
+
+    # Search for NVIDIA GLX / Vulkan library across standard container paths
+    search_dirs = [
+        Path("/usr/lib/x86_64-linux-gnu"),
+        Path("/usr/local/nvidia/lib64"),
+        Path("/usr/local/nvidia/lib"),
+        Path("/usr/lib64"),
+        Path("/usr/lib"),
     ]
-    found_lib = next((p for p in lib_candidates if p.exists()), None)
-    if not found_lib:
-        return
-    try:
-        tmp_icd = Path("/tmp/nvidia_vulkan_icd.json")
-        if not tmp_icd.exists():
+
+    found_lib = None
+    for d in search_dirs:
+        if not d.exists():
+            continue
+        # Direct check for libGLX_nvidia.so.0 or versioned variants
+        candidates = list(d.glob("libGLX_nvidia.so*"))
+        if candidates:
+            found_lib = candidates[0]
+            # Ensure the driver directory is in LD_LIBRARY_PATH so dependent libs (e.g. libnvidia-glcore) load
+            lib_dir = str(d)
+            cur_ld = os.environ.get("LD_LIBRARY_PATH", "")
+            if lib_dir not in cur_ld.split(":"):
+                os.environ["LD_LIBRARY_PATH"] = f"{lib_dir}:{cur_ld}" if cur_ld else lib_dir
+            break
+
+    if found_lib and not found_existing:
+        try:
+            tmp_icd = Path("/tmp/nvidia_vulkan_icd.json")
             tmp_icd.write_text(
                 json.dumps({
                     "file_format_version": "1.0.0",
                     "ICD": {
-                        "library_path": str(found_lib),
+                        "library_path": str(found_lib.resolve()),
                         "api_version": "1.3.0",
                     },
                 }),
                 encoding="utf-8",
             )
-        os.environ["VK_ICD_FILENAMES"] = str(tmp_icd)
-        os.environ["VK_DRIVER_FILES"] = str(tmp_icd)
-    except Exception:
-        pass
+            os.environ["VK_ICD_FILENAMES"] = str(tmp_icd)
+            os.environ["VK_DRIVER_FILES"] = str(tmp_icd)
+            sys.stderr.write(f"[cohere_worker] Created temporary Vulkan ICD pointing to {found_lib}\n")
+            sys.stderr.flush()
+        except Exception as e:
+            sys.stderr.write(f"[cohere_worker] Failed creating Vulkan ICD: {e}\n")
+            sys.stderr.flush()
 
 
 def main():
@@ -103,9 +130,14 @@ def main():
             return
         if check_avail and has_probe:
             try:
-                if not transcribe_cpp.backend_available(name):
+                avail = transcribe_cpp.backend_available(name)
+                if not avail:
+                    sys.stderr.write(f"[cohere_worker] transcribe_cpp probe: backend '{name}' reported not available.\n")
+                    sys.stderr.flush()
                     return
-            except Exception:
+            except Exception as e:
+                sys.stderr.write(f"[cohere_worker] transcribe_cpp probe for '{name}' error: {e}\n")
+                sys.stderr.flush()
                 return
         backends_to_try.append(name)
 
@@ -118,6 +150,9 @@ def main():
         _add_backend("cuda", check_avail=True)
         _add_backend("vulkan", check_avail=True)
         _add_backend("auto", check_avail=False)
+        # If vulkan was excluded by the probe, still try it directly to get C++ error or bypass probe quirk
+        if "vulkan" not in backends_to_try:
+            backends_to_try.append("vulkan")
         _add_backend("cpu_accel", check_avail=True)
         _add_backend("cpu", check_avail=False)
 
@@ -129,6 +164,9 @@ def main():
             break
         except Exception as e:
             last_err = e
+            # Surface why a (GPU) backend was skipped instead of silently falling back to CPU
+            sys.stderr.write(f"[cohere_worker] backend '{b}' failed: {e}\n")
+            sys.stderr.flush()
 
     if model is None:
         sys.stdout.write(json.dumps({
