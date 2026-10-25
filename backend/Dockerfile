@@ -38,6 +38,10 @@ ENV MEETING_DB_PATH=/app/data/meetings.db
 # ربط ملفات تشغيل كرت الشاشة بالنظام ليجدها LLaMA فوراً
 ENV LD_LIBRARY_PATH=/usr/local/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/usr/local/lib/python3.11/site-packages/nvidia/cublas/lib:$LD_LIBRARY_PATH
 
+# Required by NVIDIA 615+ Vulkan ICD (libGLX_nvidia.so.0 dlopens libEGL.so.1)
+RUN apt-get update && apt-get install -y --no-install-recommends libegl1 \
+    && rm -rf /var/lib/apt/lists/*
+
 EXPOSE 3011
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "3011", "--timeout-keep-alive", "3600"]
