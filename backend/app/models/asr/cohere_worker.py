@@ -47,12 +47,20 @@ def main():
     model = None
     loaded_backend = None
 
-    # Probe backends: try vulkan if available, then auto, then cpu
+    # Probe backends: try cuda if available, then vulkan, then auto, then cpu
     backends_to_try = []
-    if preferred_backend in ["auto", "vulkan", "gpu"]:
-        if hasattr(transcribe_cpp, "backend_available") and transcribe_cpp.backend_available("vulkan"):
-            backends_to_try.append("vulkan")
-        backends_to_try.append("auto")
+    if preferred_backend in ["cuda", "gpu", "auto", "vulkan"]:
+        if hasattr(transcribe_cpp, "backend_available"):
+            if transcribe_cpp.backend_available("cuda"):
+                backends_to_try.append("cuda")
+            if transcribe_cpp.backend_available("vulkan"):
+                backends_to_try.append("vulkan")
+        else:
+            backends_to_try.append("cuda")
+        if preferred_backend != "cuda":
+            backends_to_try.append("auto")
+    elif preferred_backend != "cpu":
+        backends_to_try.append(preferred_backend)
     backends_to_try.append("cpu")
 
     last_err = None
@@ -72,9 +80,12 @@ def main():
         sys.stdout.flush()
         sys.exit(1)
 
-    # Optimal thread count: utilize CPU cores fully for 2.0B parameter model
+    # Optimal thread count: utilize CPU cores appropriately
     cpu_cores = os.cpu_count() or 4
-    optimal_threads = max(4, min(16, cpu_cores - 2))
+    if loaded_backend in ["cuda", "vulkan", "gpu"]:
+        optimal_threads = max(2, min(8, cpu_cores // 2))
+    else:
+        optimal_threads = max(2, min(12, cpu_cores - 2 if cpu_cores > 4 else cpu_cores))
 
     # Initialize persistent session for fast sequential slice processing
     session = None

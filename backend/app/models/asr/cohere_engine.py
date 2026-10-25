@@ -30,9 +30,8 @@ class CohereASREngine(BaseASREngine):
     """
 
     # Cohere runs via transcribe_cpp in an isolated subprocess.
-    # Because transcribe_cpp utilizes multi-threaded CPU inference, running a single
-    # dedicated worker avoids CPU contention, memory duplication, and timeouts.
-    allow_secondary_workers: bool = False
+    # Enables parallel workers when system has sufficient VRAM / CPU resources.
+    allow_secondary_workers: bool = True
 
     def __init__(self, model_path: Optional[Path] = None):
         default_path = settings.MODELS_DIR / getattr(
@@ -101,10 +100,14 @@ class CohereASREngine(BaseASREngine):
 
         logger.info(f"Loading Cohere Transcribe Arabic from {self.model_path.name} in isolated worker...")
 
-        # Hardware Resilience (Rule 3): Try auto (Vulkan/CUDA/GPU), gracefully fallback to CPU
+        # Hardware Resilience: Try CUDA first if GPU available, then auto, gracefully fallback to CPU
+        from ...services.hardware import get_hardware_profile
+        hw = get_hardware_profile()
+        backend_choices = ["cuda", "auto", "cpu"] if hw.use_gpu else ["auto", "cpu"]
+
         loaded = False
         last_error = ""
-        for backend_choice in ["auto", "cpu"]:
+        for backend_choice in backend_choices:
             try:
                 logger.info(f"Attempting to spawn Cohere worker with backend='{backend_choice}'...")
                 self._stderr_buffer.clear()
@@ -262,14 +265,6 @@ class CohereASREngine(BaseASREngine):
             resp = json.loads(resp_line)
             raw_text = resp.get("text", "") or ""
             raw_text = raw_text.replace("@@@فراغ", "").strip()
-
-            # Worker Process Recycling:
-            # Every 25 slices, recycle the worker subprocess to release all OS heap memory back to Linux
-            self._slice_count = getattr(self, "_slice_count", 0) + 1
-            if self._slice_count % 25 == 0:
-                logger.info(f"Recycling Cohere worker process after {self._slice_count} slices to prevent memory accumulation...")
-                self.unload()
-                self.load()
 
             return raw_text
         except Exception as e:

@@ -61,6 +61,12 @@ export const ProcessingView: React.FC<ProcessingViewProps> = ({
     };
   }, [fileId, numSpeakers, denoiseMode, asrModel, startTranscription, cancelTranscription]);
 
+  const hasNotifiedErrorRef = React.useRef(false);
+  const onErrorRef = React.useRef(onError);
+  useEffect(() => {
+    onErrorRef.current = onError;
+  }, [onError]);
+
   useEffect(() => {
     if (result && result.length > 0) {
       const timer = setTimeout(() => onComplete(), 1000);
@@ -69,10 +75,16 @@ export const ProcessingView: React.FC<ProcessingViewProps> = ({
   }, [result, onComplete]);
 
   useEffect(() => {
-    if (error && onError) {
-      onError();
+    if (error && !hasNotifiedErrorRef.current) {
+      hasNotifiedErrorRef.current = true;
+      if (onErrorRef.current) {
+        onErrorRef.current();
+      }
     }
-  }, [error, onError]);
+    if (!error) {
+      hasNotifiedErrorRef.current = false;
+    }
+  }, [error]);
 
   // Keep progress strictly monotonic so it never jumps backward
   const rawProgress = status?.progress || 0;

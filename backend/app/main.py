@@ -43,6 +43,16 @@ if hasattr(sys.stderr, 'reconfigure'):
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Filter noisy polling requests (e.g. GET /api/meetings) from Uvicorn access logs
+class EndpointFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if 'GET /api/meetings' in msg or 'GET /api/health' in msg:
+            return False
+        return True
+
+logging.getLogger('uvicorn.access').addFilter(EndpointFilter())
+
 def print_startup_banner():
     import socket
     from .services.hardware import get_hardware_profile

@@ -95,7 +95,7 @@ class LoudnessProcessor:
                 stderr=subprocess.PIPE,
                 text=True,
                 errors="ignore",
-                timeout=120,
+                timeout=600,
             )
             m_json = self._extract_loudnorm_json(m_proc.stderr)
         except Exception as e:
@@ -172,7 +172,7 @@ class LoudnessProcessor:
                 stderr=subprocess.PIPE,
                 text=True,
                 errors="ignore",
-                timeout=180,
+                timeout=600,
             )
             if r_proc.returncode != 0:
                 res.normalization_mode_used = "error_render_failed"
@@ -214,7 +214,7 @@ class LoudnessProcessor:
                 stderr=subprocess.PIPE,
                 text=True,
                 errors="ignore",
-                timeout=120,
+                timeout=600,
             )
             v_json = self._extract_loudnorm_json(v_proc.stderr)
             if v_json:

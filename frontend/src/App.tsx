@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Trash2, RefreshCw } from 'lucide-react';
 import { AppView, MainTab, Meeting } from './types';
 import { Header } from './components/Layout/Header';
@@ -115,11 +115,11 @@ function App() {
     setUploadProgress(0);
   };
 
-  const handleTranscriptionError = () => {
+  const handleTranscriptionError = useCallback(() => {
     fetchMeetings();
-  };
+  }, [fetchMeetings]);
 
-  const handleTranscriptionComplete = async () => {
+  const handleTranscriptionComplete = useCallback(async () => {
     if (!fileId) return;
     try {
       const meeting = await api.getMeeting(fileId);
@@ -130,7 +130,7 @@ function App() {
     } catch (error) {
       console.error("Failed to load meeting after transcription", error);
     }
-  };
+  }, [fileId, fetchMeetings]);
 
   const handleSummaryUpdated = (summary: string) => {
     if (currentMeeting) {

@@ -66,7 +66,7 @@ class AudioAnalyzer:
                 stderr=subprocess.PIPE,
                 text=True,
                 errors="ignore",
-                timeout=15,
+                timeout=60,
             )
             stderr = res.stderr
             # Check for duration
@@ -148,12 +148,15 @@ class AudioAnalyzer:
             "-",
         ]
 
+        probe_dur = float(meta.get("duration", 0.0) or 0.0)
+        dyn_timeout = max(600, int(probe_dur * 3.0))
+
         try:
             proc = subprocess.run(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                timeout=120,
+                timeout=dyn_timeout,
             )
             if proc.returncode != 0 or len(proc.stdout) == 0:
                 err_msg = proc.stderr.decode("utf-8", errors="ignore")[:300] or "Decode failed"

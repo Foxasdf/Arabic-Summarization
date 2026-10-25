@@ -112,15 +112,17 @@ class HardwareProfile:
             return 2 if (self.cpu_threads >= 8 and self.ram_available_gb >= 16.0) else 1
 
         # Dynamic VRAM scaling:
-        # Each ASR model worker takes ~1.8 - 2.8 GB VRAM.
-        # Preserve at least 2.0 GB headroom for CUDA context & OS.
-        avail_vram = max(0.0, self.vram_free_gb - 2.0)
-        if self.vram_total_gb >= 15.0 and avail_vram >= 8.5:
+        # Each ASR model worker takes ~1.5 - 2.5 GB VRAM.
+        # Preserve at least 1.5 GB headroom for CUDA context & OS.
+        avail_vram = max(0.0, self.vram_free_gb - 1.5)
+        if self.vram_total_gb >= 15.0 and avail_vram >= 7.0:
             return 4  # 24GB GPUs (RTX 3090, RTX 4090, A10G)
-        elif self.vram_total_gb >= 10.0 and avail_vram >= 5.5:
+        elif self.vram_total_gb >= 10.0 and avail_vram >= 4.0:
             return 3  # High-throughput 3x parallel speedup for 11GB - 12GB GPUs (RTX 2080 Ti, RTX 3060 12GB)
-        elif self.vram_total_gb >= 7.5 and avail_vram >= 2.5:
+        elif self.vram_total_gb >= 7.5 and avail_vram >= 2.0:
             return 2  # 8GB GPUs (RTX 2070, RTX 2080, RTX 3070)
+        elif self.vram_total_gb >= 10.0:
+            return 2  # Safe 2x parallel for 11GB even with resident background tasks
         return 1
 
     # ------------------------------------------------------------- Diarization
