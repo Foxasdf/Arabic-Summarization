@@ -176,20 +176,21 @@ class BaseASREngine(BaseModelEngine):
         data = audio_data
         if data.ndim > 1:
             data = data.mean(axis=1)
-        if np.issubdtype(data.dtype, np.integer):
-            data_f = data.astype(np.float32) / float(np.iinfo(data.dtype).max)
-        else:
-            data_f = data.astype(np.float32)
 
         frame_ms = 0.05
-        frame_len = int(frame_ms * sr)
-        n_frames = len(data_f) // max(1, frame_len)
+        frame_len = max(1, int(frame_ms * sr))
+        n_frames = len(data) // frame_len
         if n_frames < 2:
             return [{"idx": 0, "start": 0.0, "dur": round(total_duration, 2)}]
 
+        scale = float(np.iinfo(data.dtype).max) if np.issubdtype(data.dtype, np.integer) else 1.0
         rms_arr = np.zeros(n_frames, dtype=np.float32)
-        for k in range(n_frames):
-            rms_arr[k] = np.sqrt(np.mean(data_f[k * frame_len : (k + 1) * frame_len] ** 2) + 1e-9)
+        batch_frames = 4096
+        for b_start in range(0, n_frames, batch_frames):
+            b_end = min(n_frames, b_start + batch_frames)
+            block = data[b_start * frame_len : b_end * frame_len].reshape(b_end - b_start, frame_len)
+            block_f = block.astype(np.float32) / scale
+            rms_arr[b_start:b_end] = np.sqrt(np.mean(block_f ** 2, axis=1) + 1e-9)
         rms_db = 20.0 * np.log10(rms_arr + 1e-9)
 
         chunks: List[Dict[str, Any]] = []
@@ -319,6 +320,9 @@ class BaseASREngine(BaseModelEngine):
             min_silence_sec=min_silence_ms / 1000.0,
         )
         logger.info(f"Starting ASR on {audio_path.name} (Duration: {total_duration}s, {len(slice_info)} chunks)")
+        lo, hi = progress_range
+        if on_progress:
+            on_progress(lo, f"جاري تجهيز محركات التفريغ الصوتي ({len(slice_info)} مقطع)...")
 
         # Check worker configuration scaled to GPU VRAM and CPU cores
         from ...services.hardware import get_hardware_profile
@@ -344,17 +348,22 @@ class BaseASREngine(BaseModelEngine):
         all_engines = [self] + extra_engines
         actual_workers = len(all_engines)
         logger.info(f"Executing continuous ASR with {actual_workers} concurrent worker(s) across {len(slice_info)} chunks.")
+        if on_progress:
+            on_progress(lo + 1, f"جاري تفريغ الصوت: بدء معالجة {len(slice_info)} مقطع...")
 
         all_text_parts = []
         all_words = []
-        lo, hi = progress_range
 
         try:
             with tempfile.TemporaryDirectory() as tmp_dir:
                 tmp_path = Path(tmp_dir)
-                slice_paths: List[Optional[Path]] = []
+                import gc
+                import threading
+                cancel_flag = threading.Event()
 
-                for item in slice_info:
+                def _materialize_slice(item: Dict[str, Any]) -> Optional[Path]:
+                    if cancel_flag.is_set():
+                        return None
                     i = item["idx"]
                     start = item["start"]
                     dur = item["dur"]
@@ -384,58 +393,99 @@ class BaseASREngine(BaseModelEngine):
                         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                         slice_created = (proc.returncode == 0 and slice_wav.exists())
 
-                    slice_paths.append(slice_wav if slice_created else None)
-
-                # Release master audio array from RAM immediately before starting ASR inference
-                del audio_data
-                audio_data = None
-                import gc
-                gc.collect()
+                    return slice_wav if slice_created else None
 
                 results: List[str] = [""] * len(slice_info)
                 completed_count = 0
 
-                if actual_workers > 1:
-                    import queue
-                    from concurrent.futures import ThreadPoolExecutor, as_completed
+                try:
+                    if actual_workers > 1:
+                        import queue
+                        from concurrent.futures import ThreadPoolExecutor, as_completed
 
-                    engine_q: queue.Queue = queue.Queue()
-                    for eng in all_engines:
-                        engine_q.put(eng)
+                        engine_q: queue.Queue = queue.Queue()
+                        for eng in all_engines:
+                            engine_q.put(eng)
 
-                    def _task(idx: int, p: Optional[Path], dur: float):
-                        if p is None or not p.exists():
-                            return idx, ""
-                        worker_eng = engine_q.get()
-                        try:
+                        def _task(item: Dict[str, Any]):
+                            if cancel_flag.is_set():
+                                return item["idx"], ""
+                            idx = item["idx"]
+                            dur = item["dur"]
+                            p = _materialize_slice(item)
+                            if p is None or not p.exists():
+                                return idx, ""
+                            worker_eng = engine_q.get()
                             try:
-                                return idx, worker_eng.transcribe_slice(p, dur_sec=dur)
-                            except Exception as worker_err:
-                                logger.warning(f"ASR worker slice {idx} failed ({worker_err}), retrying on primary engine...")
-                                try:
-                                    return idx, self.transcribe_slice(p, dur_sec=dur)
-                                except Exception as fallback_err:
-                                    logger.error(f"Fallback slice {idx} transcription also failed: {fallback_err}")
+                                if cancel_flag.is_set():
                                     return idx, ""
-                        finally:
-                            if p and p.exists():
                                 try:
-                                    p.unlink()
-                                except OSError:
-                                    pass
-                            engine_q.put(worker_eng)
+                                    return idx, worker_eng.transcribe_slice(p, dur_sec=dur)
+                                except Exception as worker_err:
+                                    logger.warning(f"ASR worker slice {idx} failed ({worker_err}), retrying on primary engine...")
+                                    try:
+                                        return idx, self.transcribe_slice(p, dur_sec=dur)
+                                    except Exception as fallback_err:
+                                        logger.error(f"Fallback slice {idx} transcription also failed: {fallback_err}")
+                                        return idx, ""
+                            finally:
+                                if p and p.exists():
+                                    try:
+                                        p.unlink()
+                                    except OSError:
+                                        pass
+                                engine_q.put(worker_eng)
 
-                    with ThreadPoolExecutor(max_workers=actual_workers) as executor:
-                        futures = [
-                            executor.submit(_task, item["idx"], slice_paths[idx_k], item["dur"])
-                            for idx_k, item in enumerate(slice_info)
-                        ]
-                        for fut in as_completed(futures):
-                            try:
-                                idx, text = fut.result()
-                                results[idx] = text
-                            except Exception as fut_err:
-                                logger.error(f"Error retrieving slice transcription from parallel future: {fut_err}")
+                        executor = ThreadPoolExecutor(max_workers=actual_workers)
+                        try:
+                            futures = [
+                                executor.submit(_task, item)
+                                for item in slice_info
+                            ]
+                            for fut in as_completed(futures):
+                                try:
+                                    idx, text = fut.result()
+                                    results[idx] = text
+                                except Exception as fut_err:
+                                    logger.error(f"Error retrieving slice transcription from parallel future: {fut_err}")
+                                completed_count += 1
+                                if completed_count % 25 == 0:
+                                    gc.collect()
+                                    try:
+                                        import torch
+                                        if torch.cuda.is_available():
+                                            torch.cuda.empty_cache()
+                                    except Exception:
+                                        pass
+                                if on_progress:
+                                    pct = int(lo + (completed_count / max(1, len(slice_info))) * (hi - lo))
+                                    tot_sec = int(round(total_duration))
+                                    on_progress(
+                                        pct,
+                                        f"جاري تفريغ الصوت: المقطع {completed_count} من {len(slice_info)} [تسريع متوازي ×{actual_workers}]..."
+                                    )
+                        except InterruptedError:
+                            cancel_flag.set()
+                            for f in futures:
+                                f.cancel()
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            raise
+                        finally:
+                            if not cancel_flag.is_set():
+                                executor.shutdown(wait=True)
+                    else:
+                        for item in slice_info:
+                            idx = item["idx"]
+                            dur = item["dur"]
+                            p = _materialize_slice(item)
+                            if p is not None and p.exists():
+                                try:
+                                    results[idx] = self.transcribe_slice(p, dur_sec=dur)
+                                finally:
+                                    try:
+                                        p.unlink(missing_ok=True)
+                                    except OSError:
+                                        pass
                             completed_count += 1
                             if completed_count % 25 == 0:
                                 gc.collect()
@@ -448,42 +498,11 @@ class BaseASREngine(BaseModelEngine):
                             if on_progress:
                                 pct = int(lo + (completed_count / max(1, len(slice_info))) * (hi - lo))
                                 tot_sec = int(round(total_duration))
-                                on_progress(
-                                    pct,
-                                    f"جاري تفريغ الصوت: المقطع {completed_count} من {len(slice_info)} [تسريع متوازي ×{actual_workers}]..."
-                                )
-                else:
-                    for idx_k, item in enumerate(slice_info):
-                        idx = item["idx"]
-                        p = slice_paths[idx_k]
-                        dur = item["dur"]
-                        if p is not None and p.exists():
-                            results[idx] = self.transcribe_slice(p, dur_sec=dur)
-                            try:
-                                p.unlink()
-                            except OSError:
-                                pass
-                        completed_count += 1
-                        if completed_count % 25 == 0:
-                            gc.collect()
-                            try:
-                                import torch
-                                if torch.cuda.is_available():
-                                    torch.cuda.empty_cache()
-                            except Exception:
-                                pass
-                        if on_progress:
-                            pct = int(lo + (completed_count / max(1, len(slice_info))) * (hi - lo))
-                            tot_sec = int(round(total_duration))
-                            on_progress(pct, f"تم تفريغ المقطع {completed_count} من {len(slice_info)} ({int(round(item['start']))}/{tot_sec} ث)...")
-
-                # Clean up any remaining temporary slice audio files
-                for sp in slice_paths:
-                    if sp and sp.exists():
-                        try:
-                            sp.unlink()
-                        except OSError:
-                            pass
+                                on_progress(pct, f"تم تفريغ المقطع {completed_count} من {len(slice_info)} ({int(round(item['start']))}/{tot_sec} ث)...")
+                finally:
+                    del audio_data
+                    audio_data = None
+                    gc.collect()
 
                 # Sequential overlap deduplication and word alignment across chunk seams
                 for idx_k, item in enumerate(slice_info):

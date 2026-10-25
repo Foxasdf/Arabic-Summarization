@@ -16,6 +16,7 @@ Fallback backend:
     ensuring zero-failure under any edge case.
 """
 import os
+import asyncio
 from pathlib import Path
 import logging
 import yaml
@@ -125,7 +126,7 @@ def diarize(
         if not turns:
             raise RuntimeError("لم يتمكن نموذج Pyannote 3.1 من اكتشاف أي مقاطع للمتحدثين في التسجيل الصوتي.")
         return _normalize_turns(turns)
-    except InterruptedError:
+    except (InterruptedError, asyncio.CancelledError):
         logger.info("Pyannote diarization was cancelled/interrupted.")
         raise
     except Exception as e:

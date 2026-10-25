@@ -21,6 +21,51 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stdin, "reconfigure"):
     sys.stdin.reconfigure(encoding="utf-8")
 
+def _ensure_linux_nvidia_vulkan_icd() -> None:
+    """
+    In slim Linux Docker containers with NVIDIA GPUs, nvidia-container-toolkit
+    mounts libGLX_nvidia.so.0 / libnvidia-glcore.so, but /etc/vulkan/icd.d/nvidia_icd.json
+    may be absent. Create a temporary ICD descriptor in /tmp if needed so ggml-vulkan
+    can discover the NVIDIA GPU.
+    """
+    if not sys.platform.startswith("linux"):
+        return
+    if os.environ.get("VK_ICD_FILENAMES") or os.environ.get("VK_DRIVER_FILES"):
+        return
+    standard_icds = [
+        Path("/etc/vulkan/icd.d/nvidia_icd.json"),
+        Path("/usr/share/vulkan/icd.d/nvidia_icd.json"),
+    ]
+    for p in standard_icds:
+        if p.is_file():
+            return
+    lib_candidates = [
+        Path("/usr/lib/x86_64-linux-gnu/libGLX_nvidia.so.0"),
+        Path("/usr/lib/x86_64-linux-gnu/libnvidia-glcore.so"),
+        Path("/usr/lib64/libGLX_nvidia.so.0"),
+    ]
+    found_lib = next((p for p in lib_candidates if p.exists()), None)
+    if not found_lib:
+        return
+    try:
+        tmp_icd = Path("/tmp/nvidia_vulkan_icd.json")
+        if not tmp_icd.exists():
+            tmp_icd.write_text(
+                json.dumps({
+                    "file_format_version": "1.0.0",
+                    "ICD": {
+                        "library_path": str(found_lib),
+                        "api_version": "1.3.0",
+                    },
+                }),
+                encoding="utf-8",
+            )
+        os.environ["VK_ICD_FILENAMES"] = str(tmp_icd)
+        os.environ["VK_DRIVER_FILES"] = str(tmp_icd)
+    except Exception:
+        pass
+
+
 def main():
     if len(sys.argv) < 2:
         sys.stdout.write(json.dumps({"status": "error", "message": "Missing model path argument"}) + "\n")
@@ -28,7 +73,9 @@ def main():
         sys.exit(1)
 
     model_path = sys.argv[1]
-    preferred_backend = sys.argv[2] if len(sys.argv) > 2 else "auto"
+    preferred_backend = (sys.argv[2] if len(sys.argv) > 2 else "auto").strip().lower()
+
+    _ensure_linux_nvidia_vulkan_icd()
 
     try:
         import transcribe_cpp
@@ -47,21 +94,32 @@ def main():
     model = None
     loaded_backend = None
 
-    # Probe backends: try cuda if available, then vulkan, then auto, then cpu
+    # Probe backends in order of speed: GPU (cuda / vulkan) -> auto -> AVX CPU (cpu_accel) -> baseline cpu
     backends_to_try = []
-    if preferred_backend in ["cuda", "gpu", "auto", "vulkan"]:
-        if hasattr(transcribe_cpp, "backend_available"):
-            if transcribe_cpp.backend_available("cuda"):
-                backends_to_try.append("cuda")
-            if transcribe_cpp.backend_available("vulkan"):
-                backends_to_try.append("vulkan")
-        else:
-            backends_to_try.append("cuda")
-        if preferred_backend != "cuda":
-            backends_to_try.append("auto")
-    elif preferred_backend != "cpu":
-        backends_to_try.append(preferred_backend)
-    backends_to_try.append("cpu")
+    has_probe = hasattr(transcribe_cpp, "backend_available")
+
+    def _add_backend(name: str, check_avail: bool = True):
+        if name in backends_to_try:
+            return
+        if check_avail and has_probe:
+            try:
+                if not transcribe_cpp.backend_available(name):
+                    return
+            except Exception:
+                return
+        backends_to_try.append(name)
+
+    if preferred_backend == "cpu":
+        _add_backend("cpu_accel", check_avail=True)
+        _add_backend("cpu", check_avail=False)
+    else:
+        if preferred_backend not in ("auto", "gpu", "cuda", "vulkan", "cpu_accel"):
+            _add_backend(preferred_backend, check_avail=False)
+        _add_backend("cuda", check_avail=True)
+        _add_backend("vulkan", check_avail=True)
+        _add_backend("auto", check_avail=False)
+        _add_backend("cpu_accel", check_avail=True)
+        _add_backend("cpu", check_avail=False)
 
     last_err = None
     for b in backends_to_try:
@@ -80,9 +138,30 @@ def main():
         sys.stdout.flush()
         sys.exit(1)
 
-    # Optimal thread count: utilize CPU cores appropriately
+    actual_backend = loaded_backend
+    device_type = ""
+    device_desc = ""
+    try:
+        if getattr(model, "backend", None):
+            actual_backend = str(model.backend).strip().lower()
+    except Exception:
+        pass
+    try:
+        dev = getattr(model, "device", None)
+        if dev is not None:
+            device_type = str(getattr(dev, "device_type", "") or "").strip().lower()
+            device_desc = str(getattr(dev, "description", "") or getattr(dev, "name", "") or "").strip()
+    except Exception:
+        pass
+
+    is_gpu = (
+        actual_backend in ("cuda", "vulkan", "metal", "rocm", "gpu")
+        or device_type in ("gpu", "igpu")
+    )
+
+    # Optimal thread count: utilize CPU cores appropriately without oversubscribing
     cpu_cores = os.cpu_count() or 4
-    if loaded_backend in ["cuda", "vulkan", "gpu"]:
+    if is_gpu:
         optimal_threads = max(2, min(8, cpu_cores // 2))
     else:
         optimal_threads = max(2, min(12, cpu_cores - 2 if cpu_cores > 4 else cpu_cores))
@@ -102,7 +181,9 @@ def main():
     # Signal parent that model and session are loaded and ready
     sys.stdout.write(json.dumps({
         "status": "ready",
-        "backend": loaded_backend,
+        "backend": actual_backend,
+        "is_gpu": is_gpu,
+        "device": device_desc,
         "threads": optimal_threads
     }) + "\n")
     sys.stdout.flush()

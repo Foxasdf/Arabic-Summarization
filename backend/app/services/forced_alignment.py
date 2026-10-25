@@ -55,6 +55,9 @@ def _align_tokens_dp(target_words: List[str], ref_words: List[Any]) -> List[Tupl
         return []
     if M == 0:
         return []
+    if (N + 1) * (M + 1) > 25_000_000:
+        logger.warning(f"DP alignment matrix too large ({N}x{M}), falling back to relative VAD alignment.")
+        return []
 
     t_norm = [_normalize_token(w) for w in target_words]
     r_norm = [_normalize_token(getattr(w, "word", str(w))) for w in ref_words]

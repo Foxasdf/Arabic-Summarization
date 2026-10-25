@@ -30,8 +30,8 @@ class CohereASREngine(BaseASREngine):
     """
 
     # Cohere runs via transcribe_cpp in an isolated subprocess.
-    # Enables parallel workers when system has sufficient VRAM / CPU resources.
-    allow_secondary_workers: bool = True
+    # Secondary parallel workers are dynamically enabled only when the worker is backed by a GPU (CUDA/Vulkan).
+    allow_secondary_workers: bool = False
 
     def __init__(self, model_path: Optional[Path] = None):
         default_path = settings.MODELS_DIR / getattr(
@@ -41,6 +41,8 @@ class CohereASREngine(BaseASREngine):
         self.chunk_len = float(getattr(settings, "ASR_CHUNK_SECONDS", 25.0))
         self.overlap = float(getattr(settings, "ASR_OVERLAP_SECONDS", 2.5))
         self.process: Optional[subprocess.Popen] = None
+        self.actual_backend: str = "cpu"
+        self.is_gpu_backend: bool = False
         self._worker_script = Path(__file__).resolve().parent / "cohere_worker.py"
         self._stdout_queue: queue.Queue = queue.Queue()
         self._stderr_buffer: List[str] = []
@@ -100,10 +102,8 @@ class CohereASREngine(BaseASREngine):
 
         logger.info(f"Loading Cohere Transcribe Arabic from {self.model_path.name} in isolated worker...")
 
-        # Hardware Resilience: Try CUDA first if GPU available, then auto, gracefully fallback to CPU
-        from ...services.hardware import get_hardware_profile
-        hw = get_hardware_profile()
-        backend_choices = ["cuda", "auto", "cpu"] if hw.use_gpu else ["auto", "cpu"]
+        # Hardware Resilience: cohere_worker 'auto' probes cuda -> vulkan -> auto -> cpu_accel -> cpu
+        backend_choices = ["auto", "cpu"]
 
         loaded = False
         last_error = ""
@@ -155,9 +155,22 @@ class CohereASREngine(BaseASREngine):
                 if resp.get("status") == "ready":
                     self.process = proc
                     loaded = True
-                    actual_backend = resp.get("backend", backend_choice)
+                    actual_backend = str(resp.get("backend", backend_choice)).strip().lower()
+                    is_gpu = bool(
+                        resp.get("is_gpu", actual_backend in ("cuda", "vulkan", "metal", "rocm", "gpu"))
+                    )
+                    device_desc = resp.get("device", "") or ""
                     worker_threads = resp.get("threads", "auto")
-                    logger.info(f"Cohere Transcribe Arabic worker ready using backend='{actual_backend}' (threads={worker_threads}).")
+                    self.actual_backend = actual_backend
+                    self.is_gpu_backend = is_gpu
+                    # Enable multi-worker parallelism ONLY when running on GPU.
+                    # On CPU/cpu_accel, a single multi-threaded worker avoids 3x thread oversubscription and 9GB RAM spike.
+                    self.allow_secondary_workers = is_gpu
+                    dev_info = f", device='{device_desc}'" if device_desc else ""
+                    logger.info(
+                        f"Cohere Transcribe Arabic worker ready using backend='{actual_backend}' "
+                        f"(threads={worker_threads}, gpu={is_gpu}{dev_info})."
+                    )
                     break
                 else:
                     last_error = resp.get("message", "Unknown worker error")

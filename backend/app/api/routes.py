@@ -43,6 +43,7 @@ router = APIRouter()
 # Only one heavy model job at a time – prevents two GGUFs being loaded together on small machines.
 _model_lock = asyncio.Lock()
 _active_transcriptions = set()
+_transcription_jobs: Dict[str, dict] = {}
 
 
 def default_speaker_name(speaker_id: str) -> str:
@@ -87,7 +88,7 @@ async def _run_with_progress(func, *args, **kwargs):
     try:
         while True:
             try:
-                kind, val = await asyncio.wait_for(q.get(), timeout=10.0)
+                kind, val = await asyncio.wait_for(q.get(), timeout=5.0)
                 yield kind, val
                 if kind in ("result", "error"):
                     return
@@ -116,18 +117,48 @@ async def upload_file(file: UploadFile = File(...)):
                           estimated_minutes=estimate_processing_time(duration))
 
 
-@router.get("/transcribe/{file_id}")
-async def transcribe_endpoint(
+async def _start_or_get_transcription_job(
     file_id: str,
-    num_speakers: Optional[int] = None,
-    denoise_mode: Optional[str] = None,
-    asr_model: Optional[str] = None,
-):
-    meeting = await get_meeting(file_id)
-    if not meeting:
-        raise HTTPException(status_code=404, detail="Meeting not found")
+    meeting: dict,
+    num_speakers: Optional[int],
+    denoise_mode: Optional[str],
+    asr_model: Optional[str],
+) -> dict:
+    existing = _transcription_jobs.get(file_id)
+    if existing and not existing.get("done"):
+        return existing
 
-    async def event_generator():
+    job: dict = {
+        "file_id": file_id,
+        "subscribers": set(),
+        "last_event": None,
+        "terminal_event": None,
+        "done": False,
+        "task": None,
+    }
+    _transcription_jobs[file_id] = job
+    _active_transcriptions.add(file_id)
+
+    def _broadcast(payload: dict, is_terminal: bool = False):
+        if is_terminal:
+            job["terminal_event"] = payload
+            job["done"] = True
+        else:
+            job["last_event"] = payload
+        for sub_q in list(job["subscribers"]):
+            try:
+                sub_q.put_nowait(("sse", payload))
+            except Exception:
+                pass
+
+    def _broadcast_heartbeat():
+        for sub_q in list(job["subscribers"]):
+            try:
+                sub_q.put_nowait(("heartbeat", None))
+            except Exception:
+                pass
+
+    async def _job_runner():
         wav_path = settings.UPLOAD_DIR / f"{file_id}.16k.wav"
         spk_wav_path = settings.UPLOAD_DIR / f"{file_id}.speaker.16k.wav"
         job_dir = settings.UPLOAD_DIR / f".dual_{file_id}.16k"
@@ -141,23 +172,9 @@ async def transcribe_endpoint(
             if job_dir.exists():
                 shutil.rmtree(job_dir, ignore_errors=True)
 
-        # Allow grace period in case a previous connection for this file is currently cancelling/unwinding
-        for _ in range(10):
-            if file_id not in _active_transcriptions:
-                break
-            await asyncio.sleep(0.2)
-
-        if file_id in _active_transcriptions:
-            logger.warning(f"Transcription already active for file {file_id}, rejecting duplicate concurrent request")
-            yield _sse({"error": "عملية التفريغ قيد التنفيذ بالفعل لهذا الاجتماع في الخلفية"})
-            return
-
-        _active_transcriptions.add(file_id)
-        # Immediately record status as processing in DB
         await save_meeting({"id": file_id, "status": "processing"})
 
         try:
-            # Safely locate the original uploaded audio file
             orig_name = meeting.get("filename") or ""
             orig_ext = Path(orig_name).suffix.lower()
             candidate = settings.UPLOAD_DIR / f"{file_id}{orig_ext}" if orig_ext else None
@@ -175,7 +192,7 @@ async def transcribe_endpoint(
                 ]
                 if not files:
                     await save_meeting({"id": file_id, "status": "error"})
-                    yield _sse({"error": "ملف الصوت الأصلي غير موجود على الخادم"})
+                    _broadcast({"error": "ملف الصوت الأصلي غير موجود على الخادم"}, is_terminal=True)
                     return
                 source_file = files[0]
 
@@ -200,9 +217,8 @@ async def transcribe_endpoint(
                     denoise_label = f" (عزل: {mode_str})"
                 else:
                     denoise_label = ""
-                yield _sse({"step": "preprocessing", "progress": 3, "message": f"جاري تجهيز وتنقية الملف الصوتي{denoise_label}..."})
-                
-                # Check if audio profiles were already converted and ready
+                _broadcast({"step": "preprocessing", "progress": 3, "message": f"جاري تجهيز وتنقية الملف الصوتي{denoise_label}..."})
+
                 reused = False
                 if wav_path.exists() and spk_wav_path.exists():
                     try:
@@ -217,34 +233,32 @@ async def transcribe_endpoint(
                         process_dual_profile_audio(source_file, wav_path, spk_wav_path, denoise_mode=denoise_mode)
                     )
                     while not task.done():
-                        yield ": keepalive\n\n"
+                        _broadcast_heartbeat()
                         try:
                             await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
                         except asyncio.TimeoutError:
-                            yield ": keepalive\n\n"
+                            _broadcast_heartbeat()
                     ok, err = task.result()
                     if not ok:
                         raise RuntimeError(f"فشل تحويل وتنقية الملف الصوتي (ffmpeg): {err or ''}")
-                yield _sse({"step": "preprocessing", "progress": 8, "message": "تم تحويل وتنقية وتجهيز مسارات الصوت بنجاح"})
+                _broadcast({"step": "preprocessing", "progress": 8, "message": "تم تحويل وتنقية وتجهيز مسارات الصوت بنجاح"})
 
                 backend_label = "Pyannote 3.1 (NVIDIA GPU)"
-                yield _sse({"step": "diarization", "progress": 10,
+                _broadcast({"step": "diarization", "progress": 10,
                             "message": f"جاري فصل وتحديد المتحدثين ({backend_label})..."})
                 turns = None
-                # Diarization strictly consumes canonical unprocessed speaker audio
                 async for kind, val in _run_with_progress(diarize, spk_wav_path, num_speakers):
                     if kind == "progress":
-                        yield _sse({"step": "diarization", "progress": val[0], "message": val[1]})
+                        _broadcast({"step": "diarization", "progress": val[0], "message": val[1]})
                     elif kind == "heartbeat":
-                        yield ": keepalive\n\n"
+                        _broadcast_heartbeat()
                     elif kind == "error":
                         raise val
                     else:
                         turns = val
                 n_spk = len({t['speaker'] for t in turns}) if turns else 1
-                yield _sse({"step": "diarization", "progress": 25, "message": f"تم اكتشاف {n_spk} متحدث/متحدثين بنجاح عبر Pyannote"})
+                _broadcast({"step": "diarization", "progress": 25, "message": f"تم اكتشاف {n_spk} متحدث/متحدثين بنجاح عبر Pyannote"})
 
-                # Explicitly flush PyTorch CUDA cache so ASR has 100% of GPU VRAM available
                 import gc
                 gc.collect()
                 try:
@@ -254,10 +268,7 @@ async def transcribe_endpoint(
                 except Exception:
                     pass
 
-                # Speaker-aware ASR:
-                # Transcribes each speaker turn using the chosen ASR engine (Cohere/Audar/Whisper),
-                # guaranteeing exact speaker attribution with zero word mixing or fragmentation
-                yield _sse({"step": "asr", "progress": 25, "message": "جاري تفريغ الصوت وتنسيق المتحدثين..."})
+                _broadcast({"step": "asr", "progress": 25, "message": "جاري تفريغ الصوت وتنسيق المتحدثين..."})
                 segments = None
                 async for kind, val in _run_with_progress(
                     transcribe_with_speakers, wav_path, turns,
@@ -266,9 +277,9 @@ async def transcribe_endpoint(
                     speaker_audio_path=spk_wav_path,
                 ):
                     if kind == "progress":
-                        yield _sse({"step": "asr", "progress": val[0], "message": val[1]})
+                        _broadcast({"step": "asr", "progress": val[0], "message": val[1]})
                     elif kind == "heartbeat":
-                        yield ": keepalive\n\n"
+                        _broadcast_heartbeat()
                     elif kind == "error":
                         raise val
                     else:
@@ -277,23 +288,116 @@ async def transcribe_endpoint(
                 if not segments:
                     raise RuntimeError("لم يتم استخراج أي نصوص مفرغة من الملف الصوتي (قد يكون الملف فارغاً أو يحتوي على ضوضاء فقط)")
 
-            yield _sse({"step": "alignment", "progress": 97, "message": "جاري حفظ نتائج التفريغ..."})
+            _broadcast({"step": "alignment", "progress": 97, "message": "جاري حفظ نتائج التفريغ..."})
             old = meeting.get("speakers_json") or {}
             speakers = {s["speaker"]: old.get(s["speaker"], default_speaker_name(s["speaker"])) for s in segments}
             await save_meeting({"id": file_id, "transcript_json": segments, "diarization_json": turns,
                                 "speakers_json": speakers, "status": "transcribed"})
             _cleanup_temp_files()
-            yield _sse({"step": "done", "progress": 100, "result": segments, "speakers": speakers})
+            _broadcast({"step": "done", "progress": 100, "result": segments, "speakers": speakers}, is_terminal=True)
         except asyncio.CancelledError:
-            logger.warning(f"Transcription connection cancelled by client for meeting {file_id}")
+            logger.warning(f"Background transcription job explicitly cancelled for meeting {file_id}")
             await save_meeting({"id": file_id, "status": "error"})
+            _broadcast({"error": "تم إلغاء عملية التفريغ"}, is_terminal=True)
             raise
         except Exception as e:
             logger.exception("Transcription failed")
             await save_meeting({"id": file_id, "status": "error"})
-            yield _sse({"error": str(e)})
+            _broadcast({"error": str(e)}, is_terminal=True)
         finally:
+            job["done"] = True
             _active_transcriptions.discard(file_id)
+            _transcription_jobs.pop(file_id, None)
+
+    job["task"] = asyncio.create_task(_job_runner())
+    return job
+
+
+@router.get("/transcribe/{file_id}")
+async def transcribe_endpoint(
+    file_id: str,
+    num_speakers: Optional[int] = None,
+    denoise_mode: Optional[str] = None,
+    asr_model: Optional[str] = None,
+):
+    meeting = await get_meeting(file_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+
+    async def event_generator():
+        # If the meeting already completed while the client was reconnecting, return final result immediately
+        latest_meeting = await get_meeting(file_id) or meeting
+        if (
+            file_id not in _transcription_jobs
+            and file_id not in _active_transcriptions
+            and latest_meeting.get("status") in ("transcribed", "completed")
+            and latest_meeting.get("transcript_json")
+        ):
+            yield _sse({
+                "step": "done",
+                "progress": 100,
+                "result": latest_meeting["transcript_json"],
+                "speakers": latest_meeting.get("speakers_json") or {},
+            })
+            return
+
+        if file_id in _active_transcriptions and file_id not in _transcription_jobs:
+            logger.warning(f"Transcription already active for file {file_id}, rejecting duplicate concurrent request")
+            yield _sse({"error": "عملية التفريغ قيد التنفيذ بالفعل لهذا الاجتماع في الخلفية"})
+            return
+
+        reattaching = file_id in _transcription_jobs and not _transcription_jobs[file_id].get("done")
+        if reattaching:
+            logger.info(f"Re-attaching SSE client to active background transcription for meeting {file_id}")
+
+        job = await _start_or_get_transcription_job(
+            file_id=file_id,
+            meeting=latest_meeting,
+            num_speakers=num_speakers,
+            denoise_mode=denoise_mode,
+            asr_model=asr_model,
+        )
+
+        sub_q: asyncio.Queue = asyncio.Queue()
+        job["subscribers"].add(sub_q)
+
+        try:
+            if job.get("last_event"):
+                yield _sse(job["last_event"])
+            if job.get("terminal_event"):
+                yield _sse(job["terminal_event"])
+                return
+
+            idle_ticks = 0
+            while True:
+                if job.get("done") and sub_q.empty():
+                    if job.get("terminal_event"):
+                        yield _sse(job["terminal_event"])
+                    return
+                try:
+                    kind, payload = await asyncio.wait_for(sub_q.get(), timeout=5.0)
+                    if kind == "heartbeat":
+                        idle_ticks += 1
+                        yield ": keepalive\n\n"
+                        if idle_ticks >= 3 and job.get("last_event"):
+                            idle_ticks = 0
+                            yield _sse(job["last_event"])
+                    elif kind == "sse":
+                        idle_ticks = 0
+                        yield _sse(payload)
+                        if payload.get("step") == "done" or payload.get("error"):
+                            return
+                except asyncio.TimeoutError:
+                    idle_ticks += 1
+                    yield ": keepalive\n\n"
+                    if idle_ticks >= 3 and job.get("last_event"):
+                        idle_ticks = 0
+                        yield _sse(job["last_event"])
+        except asyncio.CancelledError:
+            logger.info(f"SSE client disconnected from meeting {file_id}; background transcription continues.")
+            raise
+        finally:
+            job["subscribers"].discard(sub_q)
 
     return StreamingResponse(
         event_generator(),
@@ -516,6 +620,11 @@ async def get_meeting_detail(meeting_id: str):
 
 @router.delete("/meetings/{meeting_id}")
 async def delete_meeting_endpoint(meeting_id: str):
+    job = _transcription_jobs.get(meeting_id)
+    if job and job.get("task") and not job["task"].done():
+        job["task"].cancel()
+    _active_transcriptions.discard(meeting_id)
+    _transcription_jobs.pop(meeting_id, None)
     await delete_meeting(meeting_id)
     for f in settings.UPLOAD_DIR.glob(f"{meeting_id}*"):
         try:

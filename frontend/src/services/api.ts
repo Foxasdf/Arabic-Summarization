@@ -66,13 +66,35 @@ export const api = {
       if (asrModel) params.append('asr_model', asrModel);
       const qs = params.toString();
       const url = qs ? `${API_BASE}/transcribe/${fileId}?${qs}` : `${API_BASE}/transcribe/${fileId}`;
-      const eventSource = new EventSource(url);
-
+      let eventSource: EventSource | null = null;
       let errorTimer: ReturnType<typeof setTimeout> | null = null;
+      let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+      let settled = false;
+      let retryCount = 0;
+      const MAX_RETRIES = 15;
+
+      const cleanup = () => {
+        if (errorTimer) {
+          clearTimeout(errorTimer);
+          errorTimer = null;
+        }
+        if (reconnectTimer) {
+          clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
+        if (signal) {
+          signal.removeEventListener('abort', abortHandler);
+        }
+        if (eventSource) {
+          eventSource.close();
+          eventSource = null;
+        }
+      };
 
       const abortHandler = () => {
-        if (errorTimer) clearTimeout(errorTimer);
-        eventSource.close();
+        if (settled) return;
+        settled = true;
+        cleanup();
         reject(new Error('تم إلغاء عملية التفريغ'));
       };
 
@@ -80,76 +102,109 @@ export const api = {
         signal.addEventListener('abort', abortHandler, { once: true });
       }
 
-      const cleanup = () => {
-        if (errorTimer) {
-          clearTimeout(errorTimer);
-          errorTimer = null;
+      const scheduleReconnect = () => {
+        if (settled || signal?.aborted) return;
+        if (retryCount >= MAX_RETRIES) {
+          settled = true;
+          cleanup();
+          reject(new Error('فشل أو انقطع الاتصال بخادم المعالجة'));
+          return;
         }
-        if (signal) {
-          signal.removeEventListener('abort', abortHandler);
+        retryCount += 1;
+        if (eventSource) {
+          eventSource.close();
+          eventSource = null;
         }
-        eventSource.close();
-      };
-
-      eventSource.onopen = () => {
-        if (errorTimer) {
-          clearTimeout(errorTimer);
-          errorTimer = null;
-        }
-      };
-
-      eventSource.onmessage = (event) => {
-        if (errorTimer) {
-          clearTimeout(errorTimer);
-          errorTimer = null;
-        }
-        try {
-          const data: ProcessingStatus = JSON.parse(event.data);
-          onProgress(data);
-
-          // Handle errors sent via SSE
-          if (data.error) {
-            cleanup();
-            reject(new Error(data.error));
-            return;
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(async () => {
+          if (settled || signal?.aborted) return;
+          try {
+            const m = await api.getMeeting(fileId);
+            if ((m.status === 'transcribed' || m.status === 'completed') && m.transcript_json && m.transcript_json.length > 0) {
+              settled = true;
+              cleanup();
+              resolve(m.transcript_json);
+              return;
+            }
+          } catch {
+            // Ignore transient fetch errors while reconnecting
           }
+          connect();
+        }, Math.min(5000, 1500 * retryCount));
+      };
 
-          // Backend sends step: 'done' when complete
-          if (data.step === 'done') {
-            cleanup();
-            if (data.result && data.result.length > 0) {
-              resolve(data.result);
-            } else {
-              reject(new Error('لم يتم استخراج أي نصوص مفرغة من الملف الصوتي'));
+      const connect = () => {
+        if (settled || signal?.aborted) return;
+        const es = new EventSource(url);
+        eventSource = es;
+
+        es.onopen = () => {
+          retryCount = 0;
+          if (errorTimer) {
+            clearTimeout(errorTimer);
+            errorTimer = null;
+          }
+        };
+
+        es.onmessage = (event) => {
+          retryCount = 0;
+          if (errorTimer) {
+            clearTimeout(errorTimer);
+            errorTimer = null;
+          }
+          try {
+            const data: ProcessingStatus = JSON.parse(event.data);
+            onProgress(data);
+
+            // Handle errors sent via SSE
+            if (data.error) {
+              settled = true;
+              cleanup();
+              reject(new Error(data.error));
+              return;
+            }
+
+            // Backend sends step: 'done' when complete
+            if (data.step === 'done') {
+              settled = true;
+              cleanup();
+              if (data.result && data.result.length > 0) {
+                resolve(data.result);
+              } else {
+                reject(new Error('لم يتم استخراج أي نصوص مفرغة من الملف الصوتي'));
+              }
+              return;
+            }
+          } catch (err) {
+            console.error('Failed to parse SSE data', err);
+          }
+        };
+
+        es.onerror = () => {
+          if (settled || signal?.aborted) return;
+          if (es.readyState === EventSource.CONNECTING) {
+            if (!errorTimer) {
+              errorTimer = setTimeout(() => {
+                errorTimer = null;
+                if (es.readyState !== EventSource.OPEN) {
+                  scheduleReconnect();
+                }
+              }, 20000);
             }
             return;
           }
-        } catch (err) {
-          console.error('Failed to parse SSE data', err);
-        }
-      };
 
-      eventSource.onerror = () => {
-        // If readyState is CONNECTING (0), browser is automatically attempting to reconnect
-        if (eventSource.readyState === EventSource.CONNECTING) {
-          if (!errorTimer) {
-            // Allow 60s grace period for heavy operations / network re-handshakes
-            errorTimer = setTimeout(() => {
-              if (eventSource.readyState !== EventSource.OPEN) {
-                cleanup();
-                reject(new Error('انقطع الاتصال بخادم المعالجة'));
-              }
-            }, 60000);
+          if (es.readyState === EventSource.CLOSED) {
+            if (errorTimer) {
+              clearTimeout(errorTimer);
+              errorTimer = null;
+            }
+            scheduleReconnect();
           }
-          return;
-        }
-
-        if (eventSource.readyState === EventSource.CLOSED) {
-          if (errorTimer) clearTimeout(errorTimer);
-          cleanup();
-          reject(new Error('فشل أو انقطع الاتصال بخادم المعالجة'));
-        }
+        };
       };
+
+      connect();
     });
   },
 

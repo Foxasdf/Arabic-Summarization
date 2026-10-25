@@ -97,9 +97,11 @@ def transcribe_with_speakers(
             engine.unload()
 
     # Continuous VAD pipeline (Production default)
+    lo, hi = progress_range
     try:
+        if on_progress:
+            on_progress(lo, "جاري تحميل نموذج التفريغ الصوتي...")
         engine.load()
-        lo, hi = progress_range
         asr_hi = lo + int((hi - lo) * 0.85)
         asr_res = engine.transcribe(
             audio_path,
@@ -133,7 +135,14 @@ def transcribe_with_speakers(
     from .alignment import align_timestamps
 
     has_native_words = getattr(engine, "has_word_timestamps", False)
-    words = asr_res.get("words") or [] if has_native_words else []
+    engine_words = (asr_res.get("words") or []) if asr_res else []
+    words = engine_words if has_native_words else []
+    if not words and engine_words and (dur > 1200.0 or len(engine_words) > 3000):
+        logger.info(
+            f"Using chunk-coherent VAD word timestamps ({len(engine_words)} words, {dur:.1f}s) "
+            "directly for long-audio speaker attribution."
+        )
+        words = engine_words
     # Validate engine words: must cover full text and have sane durations
     if words:
         n_txt = len(text.split())

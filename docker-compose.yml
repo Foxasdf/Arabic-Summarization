@@ -12,7 +12,7 @@ services:
           devices:
             - driver: nvidia
               count: all
-              capabilities: [gpu]
+              capabilities: [gpu, compute, utility, graphics]
     volumes:
       - ./models:/app/models
       - ./backend/uploads:/app/uploads

@@ -151,6 +151,34 @@ class TestTranscriptionLocking(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.1)
         self.assertTrue(worker_stopped)
 
+    def test_diarization_has_asyncio_imported(self):
+        import app.services.diarization as diar_mod
+        self.assertTrue(hasattr(diar_mod, "asyncio"))
+
+    def test_vectorized_vad_chunk_planning_long_audio(self):
+        import numpy as np
+        from app.models.asr.base import BaseASREngine
+
+        sr = 16000
+        # 120 seconds of synthetic int16 audio with silent pauses
+        audio = np.random.randint(-3000, 3000, size=sr * 120, dtype=np.int16)
+        # Insert 0.5s silence around 25s, 50s, 75s, 100s
+        for sec in (25, 50, 75, 100):
+            audio[sec * sr : int((sec + 0.5) * sr)] = 0
+
+        chunks = BaseASREngine.plan_vad_chunks(
+            audio_data=audio,
+            sr=sr,
+            total_duration=120.0,
+            target_chunk_len=25.0,
+            min_chunk_len=18.0,
+            max_chunk_len=30.0,
+            overlap=2.5,
+            min_silence_sec=0.3,
+        )
+        self.assertGreaterEqual(len(chunks), 4)
+        self.assertEqual(chunks[0]["start"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
