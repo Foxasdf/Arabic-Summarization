@@ -229,13 +229,13 @@ def resolve_turn_overlaps(
                     break
 
                 # 3. Partial handover overlap -> preserve short turns (< 1.5s) when paired with
-                # a longer turn (>= 1.5s) by trimming the longer turn; only use midpoint splitting
-                # when both turns are >= 1.5s (or both < 1.5s).
+                # a longer turn (>= 1.5s), and also protect curr's start boundary when curr < 3.0s
+                # and prev is at least 2x longer than curr (e.g. a 2-2.5s question interrupting a long monologue).
                 first, second = (a, b) if a["start"] <= b["start"] else (b, a)
                 f_dur, s_dur = _dur(first), _dur(second)
                 if f_dur < 1.5 and s_dur >= 1.5:
                     second["start"] = first["end"]
-                elif s_dur < 1.5 and f_dur >= 1.5:
+                elif (s_dur < 1.5 and f_dur >= 1.5) or (s_dur < 3.0 and f_dur >= 2.0 * s_dur):
                     first["end"] = second["start"]
                 else:
                     mid = 0.5 * (first["end"] + second["start"])

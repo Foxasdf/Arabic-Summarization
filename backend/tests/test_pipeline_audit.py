@@ -153,7 +153,7 @@ class TestPipelineAuditFixes(unittest.TestCase):
             {"speaker": "B", "start": 68.00, "end": 68.30},   # 0.30s enclosed blip -> drop
             {"speaker": "C", "start": 107.91, "end": 108.66}, # duplicate pair -> keep longer
             {"speaker": "A", "start": 108.06, "end": 108.54},
-            {"speaker": "A", "start": 33.86, "end": 60.78},   # handover overlap 59.39-60.78 (both >= 1.5s -> midpoint)
+            {"speaker": "A", "start": 33.86, "end": 60.78},   # 26.92s monologue overlapping 2.54s question (<3.0s, >=2x) -> trim A to 59.39
             {"speaker": "B", "start": 59.39, "end": 61.93},
         ]
         out = resolve_turn_overlaps(turns)
@@ -165,8 +165,18 @@ class TestPipelineAuditFixes(unittest.TestCase):
         self.assertNotIn(("B", 68.0, 68.3), spans)
         self.assertIn(("C", 107.91, 108.66), spans)
         self.assertFalse(any(s == "A" and st == 108.06 for s, st, _ in spans))
-        mid = round(0.5 * (60.78 + 59.39), 2)
-        self.assertIn(("A", 33.86, mid), spans)
+        self.assertIn(("A", 33.86, 59.39), spans)
+        self.assertIn(("B", 59.39, 61.78), spans)
+
+        # Comparable turns (both >= 1.5s, prev < 2x curr) split at midpoint
+        handover_mid = resolve_turn_overlaps([
+            {"speaker": "A", "start": 10.00, "end": 14.00},
+            {"speaker": "B", "start": 13.00, "end": 16.00},
+        ])
+        self.assertEqual(
+            [(t["speaker"], t["start"], t["end"]) for t in handover_mid],
+            [("A", 10.0, 13.5), ("B", 13.5, 16.0)],
+        )
 
         # Short turn (< 1.5s) overlapping a longer turn (>= 1.5s) at handover must keep its full bounds
         handover_short = resolve_turn_overlaps([
