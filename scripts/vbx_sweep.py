@@ -6,6 +6,7 @@ Sweep Fa (lower => more willing to spawn a new speaker) x Fb (higher => more mer
 Reference: transcription_20261011_133306.json, collar 0.25s.
 """
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -60,7 +61,7 @@ def main():
             }
             tmp = ROOT / "eval_results/frozen_v1/_cfg_vbx.yaml"
             tmp.write_text(yaml.dump(cfg, default_flow_style=False), encoding="utf-8")
-            pipe = Pipeline.from_pretrained(str(tmp), token="REDACTED_HF_TOKEN")
+            pipe = Pipeline.from_pretrained(str(tmp), token=os.getenv("HF_TOKEN") or None)
             if torch.cuda.is_available():
                 pipe.to(torch.device("cuda:0"))
             with torch.inference_mode():

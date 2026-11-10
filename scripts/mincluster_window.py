@@ -3,6 +3,7 @@ T1: min_cluster_size sweep (config param). A high floor can force-merge rare spe
 T2: embedding window length vs separability (short windows -> unreliable embeddings).
 """
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -40,7 +41,7 @@ def t1_min_cluster_size():
             cfg["pipeline"]["params"].pop("plda", None)
             tmp = ROOT / "eval_results/frozen_v1/_cfg_mcs.yaml"
             tmp.write_text(yaml.dump(cfg, default_flow_style=False), encoding="utf-8")
-            pipe = Pipeline.from_pretrained(str(tmp), token="REDACTED_HF_TOKEN")
+            pipe = Pipeline.from_pretrained(str(tmp), token=os.getenv("HF_TOKEN") or None)
             if torch.cuda.is_available():
                 pipe.to(torch.device("cuda:0"))
             with torch.inference_mode():

@@ -19,7 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MODELS_DIR = PROJECT_ROOT / "models"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-DEFAULT_HF_TOKEN = os.getenv("MEETING_HF_TOKEN") or os.getenv("HF_TOKEN") or "REDACTED_HF_TOKEN"
+DEFAULT_HF_TOKEN = os.getenv("MEETING_HF_TOKEN") or os.getenv("HF_TOKEN") or ""
 
 WHISPER_REPO = "oddadmix/whisper-large-v3-turbo-arabic-dialectal-v2"
 WHISPER_RAW_DIR = MODELS_DIR / "whisper-raw" / "whisper-large-v3-turbo-arabic-dialectal-v2"

@@ -27,7 +27,7 @@ services:
       - MEETING_DIARIZATION_BACKEND=auto
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
-      - HF_TOKEN=REDACTED_HF_TOKEN
+      - HF_TOKEN=${HF_TOKEN:-}
       - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
     restart: unless-stopped
 

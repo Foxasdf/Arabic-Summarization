@@ -22,7 +22,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MODELS_DIR = PROJECT_ROOT / "models"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-DEFAULT_HF_TOKEN = os.getenv("MEETING_HF_TOKEN") or os.getenv("HF_TOKEN") or "REDACTED_HF_TOKEN"
+DEFAULT_HF_TOKEN = os.getenv("MEETING_HF_TOKEN") or os.getenv("HF_TOKEN") or ""
 
 # 1. Cohere Model Details
 COHERE_FILENAME = "cohere-transcribe-arabic-07-2026-Q5_K_M.gguf"

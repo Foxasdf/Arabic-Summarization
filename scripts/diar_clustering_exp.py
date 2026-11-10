@@ -6,6 +6,7 @@ Compares:
 Scores DER (collar 0.25s) + JER + count error vs transcription_20261011_133306.json.
 """
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -44,7 +45,7 @@ def build_pipeline(clustering, threshold=None, min_cluster_size=None, plda=True)
         cfg["pipeline"]["params"].pop("plda", None)
     tmp = ROOT / "eval_results" / "frozen_v1" / f"_cfg_{clustering}_{threshold}.yaml"
     tmp.write_text(yaml.dump(cfg, default_flow_style=False), encoding="utf-8")
-    token = "REDACTED_HF_TOKEN"
+    token = os.getenv("HF_TOKEN") or None
     return Pipeline.from_pretrained(str(tmp), token=token)
 
 

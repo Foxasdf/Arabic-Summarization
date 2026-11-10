@@ -29,8 +29,8 @@ if str(BACKEND_DIR) not in sys.path:
 from app.services.diarization import diarize
 from app.services.audio_processor import get_ffmpeg_binary
 
-# Configuration
-IFM_API_KEY = "REDACTED_IFM_API_KEY"
+# Configuration (reads from environment if set)
+IFM_API_KEY = os.getenv("IFM_API_KEY", "")
 IFM_API_URL = "https://api.ifm.ai/v1/audio/transcriptions"
 IFM_MODEL = "IFM/Jais-ASR"
 OUTPUT_DIR = Path(__file__).resolve().parent

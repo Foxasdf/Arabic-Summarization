@@ -16,8 +16,8 @@ if hasattr(sys.stdout, "reconfigure"):
 
 MODELS_DIR = Path(__file__).parent.parent / "models"
 
-# Default Token provided by user
-DEFAULT_HF_TOKEN = "REDACTED_HF_TOKEN"
+# Default Token (reads from environment if set)
+DEFAULT_HF_TOKEN = os.getenv("MEETING_HF_TOKEN") or os.getenv("HF_TOKEN") or ""
 
 # Primary Models configured for the project
 MODELS = [

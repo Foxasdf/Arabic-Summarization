@@ -157,7 +157,7 @@ def _get_or_create_local_pyannote_config() -> Path:
     seg_model = (pyannote_base / "segmentation-3.0" / "pytorch_model.bin").resolve()
     emb_model = (pyannote_base / "wespeaker-voxceleb-resnet34-LM" / "pytorch_model.bin").resolve()
 
-    hf_token = getattr(settings, "HF_TOKEN", None) or "REDACTED_HF_TOKEN"
+    hf_token = getattr(settings, "HF_TOKEN", None) or os.getenv("HF_TOKEN") or None
     # Ensure authentic PyTorch binaries (not Git-LFS pointer text files or partial files)
     _ensure_valid_model_weight(seg_model, "pyannote/segmentation-3.0", min_size=5_000_000, token=hf_token)
     _ensure_valid_model_weight(emb_model, "pyannote/wespeaker-voxceleb-resnet34-LM", min_size=25_000_000, token=hf_token)
@@ -220,7 +220,7 @@ def get_pyannote_pipeline():
     local_config_file = _get_or_create_local_pyannote_config()
     logger.info(f"Loading local Pyannote 3.1 pipeline from {local_config_file.name} (Offline)")
 
-    hf_token = getattr(settings, "HF_TOKEN", None) or "REDACTED_HF_TOKEN"
+    hf_token = getattr(settings, "HF_TOKEN", None) or os.getenv("HF_TOKEN") or None
     pipeline = Pipeline.from_pretrained(local_config_file, token=hf_token)
     if pipeline is None:
         raise RuntimeError("تعذر تحميل نموذج Pyannote من المجلد المحلي")
