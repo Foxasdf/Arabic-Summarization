@@ -47,13 +47,15 @@ def transcribe_with_speakers(
     model_identifier: Optional[Union[str, Path]] = None,
     progress_range: tuple = (25, 95),
     speaker_audio_path: Optional[Path] = None,
+    diarization_backend: Optional[str] = None,
 ) -> list:
     """
     Speaker-aware transcription pipeline:
     - Default (ASR_MODE='continuous_vad'):
       1. Performs continuous ASR over long audio contexts using VAD chunking and seam deduplication.
       2. If multiple speaker turns exist:
-         - Aligns words acoustically (CTranslate2/Whisper on CUDA/CPU) with relative VAD fallback.
+         - Aligns words acoustically (CTranslate2/Whisper on CUDA/CPU) when available,
+           or preserves chunk-bounded VAD word timestamps instead of global uniform drift.
          - Assigns words to speakers using midpoint containment & temporal overlap.
          - Smooths spurious single-word flip-flops and builds natural conversational utterances.
          - Optionally rechecks short word runs against cached speaker embeddings.
@@ -127,20 +129,21 @@ def transcribe_with_speakers(
         }]
 
     # Phase 3 & 4: Word-Level Forced Alignment and Speaker Attribution
-    # Prefer engine-native word timestamps (chunk-coherent, VAD-guided) which
-    # preserve Cohere's text verbatim. Cross-model (Whisper) forced alignment
-    # is only used as fallback when engine words are missing, because DP
-    # re-alignment across different ASR hypotheses degrades timing when the
-    # two models disagree on dialectal wording.
+    # Prefer engine-native word timestamps or chunk-coherent VAD word timestamps when
+    # acoustic Whisper CT2 alignment is not available on disk, preventing global uniform
+    # word redistribution across the entire file.
     from .alignment import align_timestamps
 
+    whisper_dir = settings.MODELS_DIR / getattr(
+        settings, "WHISPER_DIALECTAL_DIRNAME", "whisper-large-v3-turbo-arabic-dialectal-v2-ct2"
+    )
     has_native_words = getattr(engine, "has_word_timestamps", False)
     engine_words = (asr_res.get("words") or []) if asr_res else []
     words = engine_words if has_native_words else []
-    if not words and engine_words and (dur > 1200.0 or len(engine_words) > 3000):
+    if not words and engine_words and (not whisper_dir.exists() or dur > 1200.0 or len(engine_words) > 3000):
         logger.info(
             f"Using chunk-coherent VAD word timestamps ({len(engine_words)} words, {dur:.1f}s) "
-            "directly for long-audio speaker attribution."
+            "directly for speaker attribution."
         )
         words = engine_words
     # Validate engine words: must cover full text and have sane durations
@@ -170,9 +173,8 @@ def transcribe_with_speakers(
     if on_progress:
         on_progress(hi - 2, "جاري إسناد المتحدثين وتنسيق الجمل...")
 
-    # Reuse the cached Pyannote embedding model to correct short word runs that
-    # overlap a neighbouring speaker's continuous utterance. Falls back cleanly
-    # when embeddings are unavailable.
+    # Reuse the cached Pyannote embedding model (when backend=='pyannote') to correct short
+    # word runs that overlap a neighbouring speaker's continuous utterance.
     speaker_context = None
     if turns:
         from .diarization import build_speaker_embedding_context
@@ -182,6 +184,7 @@ def transcribe_with_speakers(
         speaker_context = build_speaker_embedding_context(
             Path(speaker_audio_path or audio_path),
             turns,
+            backend=diarization_backend,
         )
 
     segments = align_timestamps(words, turns, speaker_context=speaker_context)

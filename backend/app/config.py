@@ -85,8 +85,10 @@ class Settings(BaseSettings):
     SUMMARY_DEFAULT_MIN_P: float = 0.05
     SUMMARY_DEFAULT_REPEAT_PENALTY: float = 1.10
 
-    # Diarization: Pyannote 3.1 is the exclusive engine (no fallback allowed)
-    DIARIZATION_BACKEND: str = "pyannote"
+    # Diarization backend: "pyannote" (Pyannote 3.1) or "nemotron_3" (nvidia/Nemotron-3-Diarization)
+    DIARIZATION_BACKEND: str = "nemotron_3"
+    NEMOTRON_DIARIZATION_MODEL: str = "nvidia/Nemotron-3-Diarization"
+    NEMOTRON_THRESHOLD: float = 0.5
     # 0 = auto-detect the number of speakers (with min/max bounds)
     DIARIZATION_NUM_SPEAKERS: int = 0
     DIARIZATION_MIN_SPEAKERS: int = 2
@@ -112,8 +114,11 @@ class Settings(BaseSettings):
     ASR_CHUNK_SECONDS: float = 28.0
     ASR_OVERLAP_SECONDS: float = 3.0
     ASR_MIN_SILENCE_MS: int = 350
-    TURN_MERGE_SAME_SPEAKER_GAP: float = 0.8
-    TURN_PAD_MS: int = 100
+    TURN_MERGE_SAME_SPEAKER_GAP: float = 0.4
+    TURN_MIN_DURATION_SEC: float = 0.5
+    TURN_ISOLATED_MIN_DURATION_SEC: float = 0.25
+    TURN_DROP_BLIP_DURATION_SEC: float = 0.20
+    TURN_PAD_MS: int = 200
     PIPELINE_VERSION: str = "v2"
 
     HF_TOKEN: Optional[str] = os.getenv("HF_TOKEN") or None

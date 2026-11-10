@@ -16,7 +16,13 @@ import numpy as np
 
 from ..base import BaseModelEngine
 from ...config import settings
-from ...services.audio_processor import get_audio_duration, get_ffmpeg_binary
+from ...services.audio_processor import (
+    get_audio_duration,
+    get_ffmpeg_binary,
+    load_audio_16k_mono,
+    normalize_pcm_to_float32,
+)
+from ...services.alignment import clean_diarization_turns, resolve_turn_overlaps
 from ...services.vad import is_speech_present
 from .guardrails import clean_and_guard_asr_text
 
@@ -80,63 +86,140 @@ class BaseASREngine(BaseModelEngine):
     def plan_windows(
         turns: List[Dict[str, Any]],
         max_len: float = 25.0,
-        min_len: float = 0.25,
-        max_same_speaker_gap: float = 1.2,
+        min_len: Optional[float] = None,
+        max_same_speaker_gap: Optional[float] = None,
+        audio_data: Optional[np.ndarray] = None,
+        sr: int = 16000,
     ) -> List[Dict[str, Any]]:
         """
         Convert speaker diarization turns into optimal ASR windows:
-        1. Pre-merge consecutive turns of the SAME speaker when no other speaker intervenes
-           (if gap <= 2.5s and combined span <= max_len).
-        2. Filter out micro-segments (< 0.35s) which are typically noise clicks or mic bumps.
-        3. Split any long turns that exceed max_len into equal windows <= max_len.
+        1. Clean turns via clean_diarization_turns:
+           - Merge consecutive turns of the same speaker when gap <= max_same_speaker_gap (0.4s default).
+           - Absorb < 0.5s micro-segments adjacent to same-speaker or enclosed in dominant turns,
+             while preserving isolated 0.25s-0.50s short replies in silence (only dropping < 0.20s blips).
+        2. Suppress short sub-turns enclosed inside a dominant turn on single-channel mono audio
+           so the same acoustic span is not sliced and transcribed twice under different speakers.
+        3. Split any long turns that exceed max_len at local lowest-energy / silence boundaries
+           (when audio_data is available) rather than blind mid-word arithmetic fractions.
         """
         if not turns:
             return []
 
-        sorted_turns = sorted(turns, key=lambda x: float(x.get("start", 0)))
+        gap_limit = (
+            float(max_same_speaker_gap)
+            if max_same_speaker_gap is not None
+            else float(getattr(settings, "TURN_MERGE_SAME_SPEAKER_GAP", 0.4))
+        )
+        isolated_min = (
+            float(min_len)
+            if min_len is not None
+            else float(getattr(settings, "TURN_ISOLATED_MIN_DURATION_SEC", 0.25))
+        )
+        min_turn_dur = float(getattr(settings, "TURN_MIN_DURATION_SEC", 0.5))
+        drop_blip_dur = float(getattr(settings, "TURN_DROP_BLIP_DURATION_SEC", 0.20))
+
+        cleaned = clean_diarization_turns(
+            turns,
+            max_same_speaker_gap=gap_limit,
+            min_duration=min_turn_dur,
+            isolated_min_duration=isolated_min,
+            drop_blip_duration=drop_blip_dur,
+            absorb_enclosed_micro=False,
+        )
+        if not cleaned:
+            return []
+
+        # Make turns non-overlapping for mono slicing: drop <0.45s enclosed backchannels,
+        # carve dominant turns around longer enclosed interjections, dedupe simultaneous
+        # near-identical turns, and split partial handover overlaps at the midpoint.
+        non_enclosed = resolve_turn_overlaps(cleaned, min_piece=isolated_min)
+        if not non_enclosed:
+            non_enclosed = [dict(t) for t in cleaned]
+
+        # Re-merge consecutive turns of the same speaker up to max_len. Turns are chronological
+        # and non-overlapping, so merged_turns[-1] is always the immediately preceding turn:
+        # two same-speaker turns are never merged across another speaker's intervening turn.
         merged_turns: List[Dict[str, Any]] = []
-
-        for t in sorted_turns:
-            start = float(t.get("start", 0))
-            end = float(t.get("end", 0))
-            dur = end - start
-            if dur < min_len:
+        for t in sorted(non_enclosed, key=lambda x: (x["start"], x["end"])):
+            start = float(t["start"])
+            end = float(t["end"])
+            if end - start < drop_blip_dur:
                 continue
-
             item = {
                 "speaker": str(t.get("speaker", "SPEAKER_00")),
                 "start": start,
                 "end": end,
             }
-
             if not merged_turns:
                 merged_turns.append(item)
                 continue
 
             prev = merged_turns[-1]
             gap = item["start"] - prev["end"]
-            combined_span = item["end"] - prev["start"]
+            combined_span = max(prev["end"], item["end"]) - prev["start"]
 
             if (
                 prev["speaker"] == item["speaker"]
-                and 0.0 <= gap <= max_same_speaker_gap
+                and gap <= gap_limit
                 and combined_span <= max_len
             ):
                 prev["end"] = max(prev["end"], item["end"])
             else:
                 merged_turns.append(item)
 
-        windows = []
+        # Optional mono float32 waveform for silence-aware splitting of long turns
+        mono_f32: Optional[np.ndarray] = None
+        if audio_data is not None and len(audio_data) > 0:
+            try:
+                mono_f32 = normalize_pcm_to_float32(audio_data)
+            except Exception:
+                mono_f32 = None
+
+        windows: List[Dict[str, Any]] = []
+        frame_sec = 0.05
+        frame_len = max(1, int(frame_sec * sr))
+
         for t in merged_turns:
-            dur = t["end"] - t["start"]
-            n = max(1, int(-(-dur // max_len)))  # ceil division
-            step = dur / n
-            for k in range(n):
+            t_start = float(t["start"])
+            t_end = float(t["end"])
+            dur = t_end - t_start
+            if dur <= max_len:
                 windows.append({
                     "speaker": t["speaker"],
-                    "start": round(t["start"] + k * step, 2),
-                    "end": round(t["start"] + (k + 1) * step, 2),
+                    "start": round(t_start, 2),
+                    "end": round(t_end, 2),
                 })
+                continue
+
+            n = max(1, int(-(-dur // max_len)))  # ceil division
+            step = dur / n
+            cut_points = [t_start]
+            for k in range(1, n):
+                target_cut = t_start + k * step
+                best_cut = target_cut
+                if mono_f32 is not None:
+                    search_lo = max(t_start + 2.0, target_cut - 2.5)
+                    search_hi = min(t_end - 2.0, target_cut + 2.5)
+                    s_idx = max(0, int(search_lo * sr))
+                    e_idx = min(len(mono_f32), int(search_hi * sr))
+                    n_frames = (e_idx - s_idx) // frame_len
+                    if n_frames >= 2:
+                        segment = mono_f32[s_idx : s_idx + n_frames * frame_len].reshape(n_frames, frame_len)
+                        rms = np.sqrt(np.mean(segment ** 2, axis=1) + 1e-12)
+                        min_f = int(np.argmin(rms))
+                        best_cut = search_lo + (min_f + 0.5) * frame_sec
+                cut_points.append(round(best_cut, 2))
+            cut_points.append(round(t_end, 2))
+
+            for k in range(len(cut_points) - 1):
+                w_st = cut_points[k]
+                w_en = cut_points[k + 1]
+                if w_en - w_st >= drop_blip_dur:
+                    windows.append({
+                        "speaker": t["speaker"],
+                        "start": round(w_st, 2),
+                        "end": round(w_en, 2),
+                    })
 
         return windows
 
@@ -173,9 +256,7 @@ class BaseASREngine(BaseModelEngine):
                 slices.append({"idx": i, "start": round(st, 2), "dur": round(d, 2)})
             return slices
 
-        data = audio_data
-        if data.ndim > 1:
-            data = data.mean(axis=1)
+        data = normalize_pcm_to_float32(audio_data)
 
         frame_ms = 0.05
         frame_len = max(1, int(frame_ms * sr))
@@ -183,13 +264,11 @@ class BaseASREngine(BaseModelEngine):
         if n_frames < 2:
             return [{"idx": 0, "start": 0.0, "dur": round(total_duration, 2)}]
 
-        scale = float(np.iinfo(data.dtype).max) if np.issubdtype(data.dtype, np.integer) else 1.0
         rms_arr = np.zeros(n_frames, dtype=np.float32)
         batch_frames = 4096
         for b_start in range(0, n_frames, batch_frames):
             b_end = min(n_frames, b_start + batch_frames)
-            block = data[b_start * frame_len : b_end * frame_len].reshape(b_end - b_start, frame_len)
-            block_f = block.astype(np.float32) / scale
+            block_f = data[b_start * frame_len : b_end * frame_len].reshape(b_end - b_start, frame_len)
             rms_arr[b_start:b_end] = np.sqrt(np.mean(block_f ** 2, axis=1) + 1e-9)
         rms_db = 20.0 * np.log10(rms_arr + 1e-9)
 
@@ -292,16 +371,13 @@ class BaseASREngine(BaseModelEngine):
             logger.info(f"Limiting transcription to first {max_duration_seconds}s of {total_duration}s")
             total_duration = max_duration_seconds
 
-        # Load audio into memory once for high-speed slicing without invoking 100+ ffmpeg processes
+        # Load audio into memory once as 16 kHz mono float32 for high-speed slicing without 100+ ffmpeg processes
         audio_data = None
         sr = 16000
         try:
-            from scipy.io import wavfile
-            sr_read, raw_data = wavfile.read(str(audio_path))
-            if sr_read == 16000:
-                audio_data = raw_data
-                sr = sr_read
-        except Exception:
+            audio_data = load_audio_16k_mono(audio_path, target_sr=16000)
+        except Exception as e:
+            logger.warning(f"In-memory 16kHz mono decode failed for {audio_path.name} ({e}); falling back to ffmpeg per slice.")
             audio_data = None
 
         chunk_len = float(getattr(self, "chunk_len", getattr(settings, "ASR_CHUNK_SECONDS", 25.0)))
@@ -376,7 +452,8 @@ class BaseASREngine(BaseModelEngine):
                             s_idx = int(start * sr)
                             e_idx = min(len(audio_data), int((start + dur) * sr))
                             if e_idx > s_idx:
-                                wavfile.write(str(slice_wav), sr, audio_data[s_idx:e_idx])
+                                slice_pcm = np.clip(audio_data[s_idx:e_idx] * 32767.0, -32768.0, 32767.0).astype(np.int16)
+                                wavfile.write(str(slice_wav), sr, slice_pcm)
                                 slice_created = slice_wav.exists()
                         except Exception:
                             slice_created = False
@@ -575,22 +652,20 @@ class BaseASREngine(BaseModelEngine):
         if not self.is_loaded():
             self.load()
 
-        windows = self.plan_windows(turns)
-        lo, hi = progress_range
-        segments: List[Dict[str, Any]] = []
-
-        # Load audio into memory once for fast slicing
+        # Load audio into memory once as 16 kHz mono float32 for fast slicing and silence-aware long-turn splits
         audio_data = None
         sr = 16000
         try:
-            from scipy.io import wavfile
-            sr_read, raw_data = wavfile.read(str(audio_path))
-            if sr_read == 16000:
-                audio_data = raw_data
-                sr = sr_read
-        except Exception:
+            audio_data = load_audio_16k_mono(audio_path, target_sr=16000)
+        except Exception as e:
+            logger.warning(f"In-memory 16kHz mono decode failed for {audio_path.name} ({e}); falling back to ffmpeg per slice.")
             audio_data = None
 
+        windows = self.plan_windows(turns, audio_data=audio_data, sr=sr)
+        lo, hi = progress_range
+        segments: List[Dict[str, Any]] = []
+
+        total_audio_dur = (len(audio_data) / float(sr)) if audio_data is not None else get_audio_duration(audio_path)
         ffmpeg_bin = get_ffmpeg_binary()
 
         # Check worker configuration
@@ -621,11 +696,19 @@ class BaseASREngine(BaseModelEngine):
                 slice_paths: List[Optional[Path]] = []
                 slice_durations: List[float] = []
 
-                pad_sec = float(getattr(settings, "TURN_PAD_MS", 100)) / 1000.0
+                pad_sec = float(getattr(settings, "TURN_PAD_MS", 200)) / 1000.0
                 for i, w in enumerate(windows):
                     slice_wav = tmp_path / f"w_{i:05d}.wav"
-                    start = max(0.0, float(w["start"]) - pad_sec)
-                    dur = (float(w["end"]) - float(w["start"])) + (pad_sec * 2.0)
+                    w_st, w_en = float(w["start"]), float(w["end"])
+                    # Expand ±200ms into silence, allowing up to 100ms (0.10s) acoustic slack past neighbor boundaries
+                    neighbor_slack = 0.10
+                    prev_end = min(float(windows[i - 1]["end"]), w_st) if i > 0 else 0.0
+                    next_start = max(float(windows[i + 1]["start"]), w_en) if i + 1 < len(windows) else float("inf")
+                    start = max(0.0, prev_end - neighbor_slack, w_st - pad_sec)
+                    end = min(next_start + neighbor_slack, w_en + pad_sec)
+                    if total_audio_dur > 0:
+                        end = min(total_audio_dur, end)
+                    dur = max(0.05, end - start)
                     slice_durations.append(dur)
 
                     slice_created = False
@@ -633,9 +716,10 @@ class BaseASREngine(BaseModelEngine):
                         try:
                             from scipy.io import wavfile
                             s_idx = int(start * sr)
-                            e_idx = min(len(audio_data), int((start + dur) * sr))
+                            e_idx = min(len(audio_data), int(end * sr))
                             if e_idx > s_idx:
-                                wavfile.write(str(slice_wav), sr, audio_data[s_idx:e_idx])
+                                slice_pcm = np.clip(audio_data[s_idx:e_idx] * 32767.0, -32768.0, 32767.0).astype(np.int16)
+                                wavfile.write(str(slice_wav), sr, slice_pcm)
                                 slice_created = slice_wav.exists()
                         except Exception:
                             slice_created = False

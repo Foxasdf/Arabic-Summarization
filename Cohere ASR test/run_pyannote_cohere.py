@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """
-Runner for Pyannote Speaker Diarization + Cohere Transcribe Arabic ASR.
-Uses the production Pyannote 3.1 config (clustering threshold 0.7046, min_duration_off=0.35s)
-and offline GPU-accelerated Cohere ASR (GGUF via transcribe_cpp / Vulkan).
-Tests both standard test audio files:
-  1. audio_nlp_1_5min.wav
-  2. 20261011_133306.m4a
+Runner for Speaker Diarization (Pyannote 3.1 / NVIDIA Nemotron-3) + Cohere Transcribe Arabic ASR.
+Supports switching between `pyannote` and `nemotron_3` via `--backend` CLI flag.
 """
-import sys
-import os
-import time
+import argparse
+import gc
 import json
-import subprocess
+import os
+import sys
+import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -26,23 +23,29 @@ BACKEND_DIR = WORKSPACE_ROOT / "backend"
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-# Ensure venv packages and torch DLLs are in path
-VENV_SITE = BACKEND_DIR / ".venv" / "Lib" / "site-packages"
-if VENV_SITE.exists() and str(VENV_SITE) not in sys.path:
-    sys.path.insert(0, str(VENV_SITE))
+# Ensure venv packages and torch DLLs are in path across Windows and Linux/macOS
+_venv_candidates = [BACKEND_DIR / ".venv" / "Lib" / "site-packages"]
+if (BACKEND_DIR / ".venv" / "lib").exists():
+    _venv_candidates.extend((BACKEND_DIR / ".venv" / "lib").glob("python*/site-packages"))
+for _venv_site in _venv_candidates:
+    if _venv_site.exists() and str(_venv_site) not in sys.path:
+        sys.path.insert(0, str(_venv_site))
+    _torch_lib = _venv_site / "torch" / "lib"
+    if _torch_lib.exists():
+        if hasattr(os, "add_dll_directory"):
+            try:
+                os.add_dll_directory(str(_torch_lib))
+            except Exception:
+                pass
+        if str(_torch_lib) not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = str(_torch_lib) + os.pathsep + os.environ.get("PATH", "")
 
-TORCH_LIB = VENV_SITE / "torch" / "lib"
-if TORCH_LIB.exists():
-    if hasattr(os, "add_dll_directory"):
-        try:
-            os.add_dll_directory(str(TORCH_LIB))
-        except Exception:
-            pass
-    if str(TORCH_LIB) not in os.environ.get("PATH", ""):
-        os.environ["PATH"] = str(TORCH_LIB) + ";" + os.environ.get("PATH", "")
-
-from app.services.diarization import diarize, invalidate_pyannote_cache
-from app.services.audio_processor import get_ffmpeg_binary
+from app.services.diarization import (
+    diarize,
+    diarization_backend_name,
+    unload_diarization_models,
+)
+from app.services.audio_processor import ensure_16k_mono_wav
 from app.models.asr import get_asr_engine
 from app.config import settings
 
@@ -52,55 +55,55 @@ COHERE_MODEL_NAME = "cohere-transcribe-arabic-07-2026-Q5_K_M.gguf"
 
 def prepare_16k_wav(audio_path: Path) -> Path:
     """
-    Ensure the audio file is converted to a clean 16kHz mono WAV for optimal
-    neural feature extraction (speaker embeddings + acoustic model).
+    Ensure the audio file is converted to a verified 16 kHz mono float32/PCM WAV
+    for optimal neural feature extraction (speaker embeddings + acoustic model).
     """
-    suffix = audio_path.suffix.lower()
     target_wav = OUTPUT_DIR / f"{audio_path.stem}_16k.wav"
-
-    if suffix == ".wav":
-        # Check if already 16kHz mono, otherwise resample cleanly
-        return audio_path
-
-    print(f"[*] Preprocessing {audio_path.name} -> 16kHz mono WAV...")
-    ffmpeg_exe = get_ffmpeg_binary()
-    cmd = [
-        ffmpeg_exe,
-        "-y",
-        "-i", str(audio_path),
-        "-vn",
-        "-ar", "16000",
-        "-ac", "1",
-        str(target_wav),
-    ]
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-    return target_wav
+    print(f"[*] Verifying / converting {audio_path.name} -> 16kHz mono WAV...")
+    return ensure_16k_mono_wav(audio_path, target_wav_path=target_wav)
 
 
-def run_pyannote_diarization(audio_path: Path, num_speakers: Optional[int] = None) -> List[Dict[str, Any]]:
+def run_speaker_diarization(
+    audio_path: Path,
+    backend: str = "pyannote",
+    num_speakers: Optional[int] = None,
+) -> List[Dict[str, Any]]:
     """
-    Run Pyannote speaker diarization with the production config.
+    Run speaker diarization using the selected backend (`pyannote` or `nemotron_3`).
     """
-    print(f"[*] Running Pyannote Diarization (production config) for {audio_path.name}...")
+    label = diarization_backend_name(backend)
+    print(f"[*] Running {label} Diarization for {audio_path.name}...")
     t0 = time.time()
 
     def on_progress(pct, msg):
         print(f"    [{pct:3d}%] {msg}", flush=True)
 
-    turns = diarize(audio_path, num_speakers=num_speakers, on_progress=on_progress)
+    turns = diarize(
+        audio_path,
+        num_speakers=num_speakers,
+        on_progress=on_progress,
+        backend=backend,
+    )
     elapsed = time.time() - t0
     speakers = sorted(list(set(t["speaker"] for t in turns)))
-    print(f"[+] Pyannote Diarization completed in {elapsed:.2f}s ({len(speakers)} speakers: {speakers})")
+    print(f"[+] {label} completed in {elapsed:.2f}s ({len(speakers)} speakers: {speakers})")
     return turns
 
 
-def run_cohere_transcription(audio_path: Path, turns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def run_cohere_transcription(
+    audio_path: Path,
+    turns: List[Dict[str, Any]],
+    engine: Optional[Any] = None,
+) -> List[Dict[str, Any]]:
     """
     Run Cohere Transcribe Arabic ASR on the diarized turns.
+    Reuses an existing loaded `engine` when provided to avoid reloading inside loops.
     """
-    print(f"[*] Loading Cohere Transcribe Arabic engine ({COHERE_MODEL_NAME})...")
-    engine = get_asr_engine(COHERE_MODEL_NAME)
-    engine.load()
+    own_engine = engine is None
+    if own_engine:
+        print(f"[*] Loading Cohere Transcribe Arabic engine ({COHERE_MODEL_NAME})...")
+        engine = get_asr_engine(COHERE_MODEL_NAME)
+        engine.load()
 
     def on_progress(pct, msg):
         print(f"    [{pct:3d}%] {msg}", flush=True)
@@ -112,10 +115,11 @@ def run_cohere_transcription(audio_path: Path, turns: List[Dict[str, Any]]) -> L
             audio_path,
             turns,
             on_progress=on_progress,
-            progress_range=(0, 100)
+            progress_range=(0, 100),
         )
     finally:
-        engine.unload()
+        if own_engine:
+            engine.unload()
 
     elapsed = time.time() - t0
     print(f"[+] Cohere ASR completed in {elapsed:.2f}s ({len(segments)} segments transcribed)")
@@ -144,41 +148,45 @@ def run_cohere_transcription(audio_path: Path, turns: List[Dict[str, Any]]) -> L
     return merged
 
 
-def process_audio_file(audio_path: Path):
+def process_audio_file(
+    audio_path: Path,
+    backend: str = "pyannote",
+    engine: Optional[Any] = None,
+):
+    label = diarization_backend_name(backend)
     print("\n" + "=" * 70)
-    print(f"PROCESSING: {audio_path.name} (Cohere + Pyannote)")
+    print(f"PROCESSING: {audio_path.name} (Cohere + {label})")
     print("=" * 70)
 
     if not audio_path.exists():
         print(f"[!] Error: File not found: {audio_path}")
         return
 
-    # Invalidate cache so any updated config.yaml parameters take immediate effect
-    invalidate_pyannote_cache()
-
-    # Preprocess audio to 16kHz mono WAV
+    # Preprocess audio to verified 16kHz mono WAV
     audio_16k = prepare_16k_wav(audio_path)
 
-    # 1. Pyannote Diarization (production config)
-    diar_turns = run_pyannote_diarization(audio_16k)
+    # 1. Speaker Diarization
+    diar_turns = run_speaker_diarization(audio_16k, backend=backend)
 
     # 2. Cohere ASR Transcription
-    segments = run_cohere_transcription(audio_16k, diar_turns)
+    segments = run_cohere_transcription(audio_16k, diar_turns, engine=engine)
 
     # 3. Save results
     base_name = audio_path.stem
-    output_json = OUTPUT_DIR / f"{base_name}_cohere_pyannote.json"
-    output_txt = OUTPUT_DIR / f"{base_name}_cohere_pyannote.txt"
+    suffix = "pyannote" if backend == "pyannote" else "nemotron_3"
+    output_json = OUTPUT_DIR / f"{base_name}_cohere_{suffix}.json"
+    output_txt = OUTPUT_DIR / f"{base_name}_cohere_{suffix}.txt"
 
     full_text = " ".join(s["text"] for s in segments)
     payload = {
         "audio_file": audio_path.name,
         "engine": "Cohere Transcribe Arabic (Q5_K_M GGUF)",
-        "diarization_engine": "Pyannote 3.1 (production config)",
+        "diarization_backend": backend,
+        "diarization_engine": label,
         "speakers_detected": sorted(list(set(s["speaker"] for s in segments))),
         "turns_count": len(segments),
         "full_text": full_text,
-        "segments": segments
+        "segments": segments,
     }
 
     with open(output_json, "w", encoding="utf-8") as f:
@@ -187,7 +195,7 @@ def process_audio_file(audio_path: Path):
     with open(output_txt, "w", encoding="utf-8") as f:
         f.write(f"Audio File: {audio_path.name}\n")
         f.write(f"ASR Model: {COHERE_MODEL_NAME}\n")
-        f.write(f"Diarization: Pyannote 3.1 (threshold=0.7046, min_duration_off=0.35s)\n")
+        f.write(f"Diarization: {label}\n")
         f.write(f"Speakers Detected: {payload['speakers_detected']}\n")
         f.write("=" * 60 + "\n\n")
         f.write("--- DIARIZED TRANSCRIPT ---\n\n")
@@ -203,7 +211,7 @@ def process_audio_file(audio_path: Path):
 
     # 4. Display formatted dialogue output
     print("\n" + "-" * 70)
-    print(f"DIARIZED TRANSCRIPT OUTPUT ({audio_path.name}):")
+    print(f"DIARIZED TRANSCRIPT OUTPUT ({audio_path.name} - {label}):")
     print("-" * 70)
     for idx, turn in enumerate(segments, 1):
         print(f"{idx:02d}. [{turn['speaker']}] ({turn['start']:.2f}s - {turn['end']:.2f}s):")
@@ -212,16 +220,43 @@ def process_audio_file(audio_path: Path):
 
 
 def main():
-    test_files = [
-        WORKSPACE_ROOT / "audio_nlp_1_5min.wav",
-        WORKSPACE_ROOT / "20261011_133306.m4a"
-    ]
+    parser = argparse.ArgumentParser(description="Run Speaker Diarization + Cohere Arabic ASR")
+    parser.add_argument(
+        "--backend",
+        choices=["pyannote", "nemotron_3", "both"],
+        default=getattr(settings, "DIARIZATION_BACKEND", "pyannote"),
+        help="Diarization backend to use (pyannote, nemotron_3, or both).",
+    )
+    parser.add_argument(
+        "--files",
+        nargs="*",
+        help="Optional audio file paths to process.",
+    )
+    args = parser.parse_args()
 
-    for audio_file in test_files:
-        process_audio_file(audio_file)
+    if args.files:
+        test_files = [Path(p) for p in args.files]
+    else:
+        test_files = [
+            WORKSPACE_ROOT / "audio_nlp_1_5min.wav",
+            WORKSPACE_ROOT / "20261011_133306.m4a",
+        ]
+
+    backends = ["pyannote", "nemotron_3"] if args.backend == "both" else [args.backend]
+
+    for backend in backends:
+        engine = get_asr_engine(COHERE_MODEL_NAME)
+        engine.load()
+        try:
+            for audio_file in test_files:
+                process_audio_file(audio_file, backend=backend, engine=engine)
+        finally:
+            engine.unload()
+            unload_diarization_models(backend)
+            gc.collect()
 
     print("\n" + "=" * 70)
-    print("ALL COHERE + PYANNOTE TESTS COMPLETED SUCCESSFULLY!")
+    print("ALL COHERE + DIARIZATION TESTS COMPLETED SUCCESSFULLY!")
     print("=" * 70)
 
 

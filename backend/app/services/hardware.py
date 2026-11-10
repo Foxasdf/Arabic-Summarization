@@ -54,21 +54,35 @@ def _ram_gb() -> tuple[float, float]:
 
 
 def _vram_gb() -> tuple[Optional[str], float, float]:
-    """Return (gpu_name, total_gb, free_gb) via nvidia-smi (0 if no NVIDIA GPU)."""
+    """Return (gpu_name, total_gb, free_gb) via nvidia-smi or torch.cuda/mps (0 if no GPU)."""
     exe = shutil.which("nvidia-smi")
-    if not exe:
-        return None, 0.0, 0.0
+    if exe:
+        try:
+            out = subprocess.run(
+                [exe, "--query-gpu=name,memory.total,memory.free", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=5,
+            ).stdout.strip().splitlines()
+            if out:
+                name, total, free = [p.strip() for p in out[0].split(",")]
+                return name, float(total) / 1024, float(free) / 1024
+        except Exception as exc:
+            logger.debug(f"nvidia-smi probe failed: {exc}")
+
     try:
-        out = subprocess.run(
-            [exe, "--query-gpu=name,memory.total,memory.free", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5,
-        ).stdout.strip().splitlines()
-        if not out:
-            return None, 0.0, 0.0
-        name, total, free = [p.strip() for p in out[0].split(",")]
-        return name, float(total) / 1024, float(free) / 1024
-    except Exception:
-        return None, 0.0, 0.0
+        import torch
+        if torch.cuda.is_available():
+            props = torch.cuda.get_device_properties(0)
+            total_gb = props.total_memory / (1024 ** 3)
+            free_bytes, _ = torch.cuda.mem_get_info(0)
+            free_gb = free_bytes / (1024 ** 3)
+            return props.name, total_gb, free_gb
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            tot_ram, avail_ram = _ram_gb()
+            return "Apple Silicon MPS", tot_ram, avail_ram
+    except Exception as exc:
+        logger.debug(f"torch GPU probe failed: {exc}")
+
+    return None, 0.0, 0.0
 
 
 def _llama_gpu_offload() -> bool:
@@ -101,7 +115,7 @@ class HardwareProfile:
 
     @property
     def use_gpu(self) -> bool:
-        return self.llama_gpu_offload and self.vram_total_gb >= 2.0
+        return self.vram_total_gb >= 2.0 and (self.llama_gpu_offload or bool(self.gpu_name))
 
     @property
     def recommended_asr_workers(self) -> int:

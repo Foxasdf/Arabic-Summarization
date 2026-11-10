@@ -12,9 +12,12 @@ from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 
 from ..config import settings
-from .audio_processor import get_audio_duration
+from .audio_processor import get_audio_duration, load_audio_16k_mono
 
 logger = logging.getLogger(__name__)
+
+_whisper_align_model = None
+_whisper_align_key = None
 
 # Ensure CUDA runtime DLLs (cublas64_12.dll) from torch/lib are reachable on Windows
 for _base in [
@@ -29,7 +32,22 @@ for _base in [
             except Exception:
                 pass
         if str(_base) not in os.environ.get("PATH", ""):
-            os.environ["PATH"] = str(_base) + ";" + os.environ.get("PATH", "")
+            os.environ["PATH"] = str(_base) + os.pathsep + os.environ.get("PATH", "")
+
+
+def unload_alignment_model() -> None:
+    """Release cached Whisper alignment model from memory."""
+    global _whisper_align_model, _whisper_align_key
+    _whisper_align_model = None
+    _whisper_align_key = None
+    import gc
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
 
 
 def _normalize_token(w: str) -> str:
@@ -136,6 +154,30 @@ def _align_tokens_dp(target_words: List[str], ref_words: List[Any]) -> List[Tupl
     return [t for t in aligned_times if t is not None]
 
 
+def _merge_overlapping_intervals(intervals: List[Dict[str, float]]) -> List[Dict[str, float]]:
+    """Merge overlapping or adjacent time intervals into disjoint sorted spans."""
+    if not intervals:
+        return []
+    sorted_ivs = sorted(
+        (
+            {"start": float(iv.get("start", 0.0)), "end": float(iv.get("end", 0.0))}
+            for iv in intervals
+            if float(iv.get("end", 0.0)) > float(iv.get("start", 0.0))
+        ),
+        key=lambda x: (x["start"], x["end"]),
+    )
+    if not sorted_ivs:
+        return []
+    merged = [dict(sorted_ivs[0])]
+    for iv in sorted_ivs[1:]:
+        prev = merged[-1]
+        if iv["start"] <= prev["end"]:
+            prev["end"] = max(prev["end"], iv["end"])
+        else:
+            merged.append(dict(iv))
+    return merged
+
+
 def fallback_relative_alignment(
     words: List[str],
     total_duration: float,
@@ -143,13 +185,15 @@ def fallback_relative_alignment(
 ) -> List[Dict[str, Any]]:
     """
     Robust fallback: distributes words across known active speech intervals
+    (after merging overlapping intervals so active duration is never double-counted)
     or uniformly across the duration if no intervals are provided.
     """
     N = len(words)
     if N == 0:
         return []
 
-    if not active_intervals:
+    merged_intervals = _merge_overlapping_intervals(active_intervals or [])
+    if not merged_intervals:
         word_dur = total_duration / max(1, N)
         return [
             {
@@ -160,16 +204,16 @@ def fallback_relative_alignment(
             for i, w in enumerate(words)
         ]
 
-    # Calculate active speech time
-    active_dur = sum(iv["end"] - iv["start"] for iv in active_intervals)
+    # Calculate active speech time over disjoint intervals
+    active_dur = sum(iv["end"] - iv["start"] for iv in merged_intervals)
     if active_dur <= 0.1:
         active_dur = total_duration
-        active_intervals = [{"start": 0.0, "end": total_duration}]
+        merged_intervals = [{"start": 0.0, "end": total_duration}]
 
     # Assign words proportionally across intervals
     items = []
     w_idx = 0
-    for iv in active_intervals:
+    for iv in merged_intervals:
         span_dur = iv["end"] - iv["start"]
         share = span_dur / active_dur
         n_in_span = max(1, int(round(share * N))) if w_idx < N else 0
@@ -209,6 +253,7 @@ def align_words_to_audio(
     Align target transcript words to acoustic timestamps.
     Attempts GPU/CPU acoustic alignment, seamlessly falling back to relative VAD alignment.
     """
+    global _whisper_align_model, _whisper_align_key
     words = transcript_text.strip().split()
     if not words:
         return []
@@ -223,58 +268,41 @@ def align_words_to_audio(
 
     if whisper_dir.exists():
         ref_words = []
-        for device, compute_type in [("cuda", "float16"), ("cpu", "int8")]:
-            try:
-                import faster_whisper
-                import scipy.io.wavfile
+        audio_f32 = None
+        sr = 16000
+        try:
+            audio_f32 = load_audio_16k_mono(audio_path, target_sr=16000)
+            if max_duration_seconds:
+                audio_f32 = audio_f32[: int(max_duration_seconds * sr)]
+        except Exception as e:
+            logger.warning(f"Failed to decode audio for forced alignment ({e}); falling back to relative alignment.")
+            audio_f32 = None
 
-                if device == "cuda":
-                    import ctranslate2
-                    if ctranslate2.get_cuda_device_count() == 0:
-                        continue
-
-                audio_f32 = None
-                sr = 16000
+        if audio_f32 is not None:
+            for device, compute_type in [("cuda", "float16"), ("cpu", "int8")]:
                 try:
-                    sr_read, raw = scipy.io.wavfile.read(str(audio_path))
-                    if raw.ndim > 1:
-                        raw = raw.mean(axis=1)
-                    if sr_read == 16000:
-                        audio_f32 = (raw.astype(np.float32) / 32768.0).copy()
-                except Exception:
-                    pass
+                    import faster_whisper
 
-                if audio_f32 is None:
-                    from .audio_processor import get_ffmpeg_binary
-                    import subprocess, tempfile
-                    ffmpeg_bin = get_ffmpeg_binary()
-                    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_f:
-                        tmp_wav_path = Path(tmp_f.name)
-                    cmd = [
-                        ffmpeg_bin, "-y", "-loglevel", "error",
-                        "-i", str(audio_path),
-                        "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
-                        str(tmp_wav_path)
-                    ]
-                    subprocess.run(cmd, check=True)
-                    _, raw = scipy.io.wavfile.read(str(tmp_wav_path))
-                    tmp_wav_path.unlink(missing_ok=True)
-                    audio_f32 = (raw.astype(np.float32) / 32768.0).copy()
+                    if device == "cuda":
+                        import ctranslate2
+                        if ctranslate2.get_cuda_device_count() == 0:
+                            continue
 
-                if max_duration_seconds:
-                    max_samples = int(max_duration_seconds * sr)
-                    audio_f32 = audio_f32[:max_samples]
-
-                logger.info(f"Running acoustic word timestamp extraction via {whisper_dir.name} on {device.upper()}...")
-                model = faster_whisper.WhisperModel(str(whisper_dir), device=device, compute_type=compute_type)
-                segs, _ = model.transcribe(audio_f32, language="ar", word_timestamps=True)
-                ref_words = [w for s in segs for w in (s.words or [])]
-                if ref_words:
-                    break
-            except Exception as e:
-                logger.warning(f"Acoustic alignment on {device.upper()} failed ({e}); trying fallback.")
-                ref_words = []
-                continue
+                    logger.info(f"Running acoustic word timestamp extraction via {whisper_dir.name} on {device.upper()}...")
+                    cache_key = (str(whisper_dir), device, compute_type)
+                    if _whisper_align_model is None or _whisper_align_key != cache_key:
+                        _whisper_align_model = faster_whisper.WhisperModel(
+                            str(whisper_dir), device=device, compute_type=compute_type
+                        )
+                        _whisper_align_key = cache_key
+                    segs, _ = _whisper_align_model.transcribe(audio_f32, language="ar", word_timestamps=True)
+                    ref_words = [w for s in segs for w in (s.words or [])]
+                    if ref_words:
+                        break
+                except Exception as e:
+                    logger.warning(f"Acoustic alignment on {device.upper()} failed ({e}); trying fallback.")
+                    ref_words = []
+                    continue
         try:
             if ref_words:
                 aligned_pairs = _align_tokens_dp(words, ref_words)

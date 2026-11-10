@@ -281,7 +281,10 @@ class CohereASREngine(BaseASREngine):
 
             resp = json.loads(resp_line)
             raw_text = resp.get("text", "") or ""
-            raw_text = raw_text.replace("@@@فراغ", "").strip()
+            import re
+            raw_text = re.sub(r"@@@\S+", " ", raw_text)
+            raw_text = re.sub(r"#{2,}[^\s.]*\.?", " ", raw_text)
+            raw_text = re.sub(r"\s+", " ", raw_text).strip()
 
             return raw_text
         except Exception as e:

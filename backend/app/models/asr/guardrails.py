@@ -47,12 +47,14 @@ def clean_and_guard_asr_text(text: str, dur_sec: Optional[float] = None) -> str:
     if "language None" in text:
         return ""
 
-    # 1. Remove special tokens
+    # 1. Remove special tokens (including Cohere @@@فراغ, @@@ضحك, @@@ضوضاء, ###...)
     for tag in [
         "<|im_end|>", "<|im_start|>", "<|endoftext|>", "<asr_text>",
         "language Arabic", "language English", "language None", "<s>", "</s>",
     ]:
         text = text.replace(tag, "")
+    text = re.sub(r"@@@\S+", " ", text)
+    text = re.sub(r"#{2,}[^\s.]*\.?", " ", text)
 
     # Collapse character repetitions (e.g. elongation 'اااااا...' or laughter 'هههههه...')
     text = re.sub(r"(.)\1{3,}", r"\1\1", text)
@@ -72,6 +74,12 @@ def clean_and_guard_asr_text(text: str, dur_sec: Optional[float] = None) -> str:
     text = re.sub(r"\[(موسيقى|ضحك|تصفيق|صوت|صمت|music|applause|laughter|noise|silence)\]", "", text, flags=re.IGNORECASE)
     # Clean lingering brackets around english words: e.g. [word] -> word
     text = re.sub(r"\[([a-zA-Z0-9_\-\s]+)\]", r"\1", text)
+
+    # Suppress hallucinated speaker-script prefixes (e.g. "- بدر: يا بدر") on short clips
+    if dur_sec is not None and dur_sec <= 1.8:
+        if re.match(r"^\s*-\s*[^:]{1,20}:\s*", text):
+            logger.debug(f"Guardrail: Discarded short-clip script hallucination: {text}")
+            return ""
 
     # Normalize whitespace
     text = re.sub(r"\s+", " ", text).strip()

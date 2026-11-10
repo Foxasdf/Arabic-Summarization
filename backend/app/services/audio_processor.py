@@ -337,3 +337,131 @@ def estimate_processing_time(duration_seconds: float) -> float:
 def validate_audio_file(path: Path) -> bool:
     """Check if file exists and has content."""
     return path.exists() and path.stat().st_size > 0
+
+
+def normalize_pcm_to_float32(data: "np.ndarray") -> "np.ndarray":
+    """
+    Convert raw audio array of any dtype/channel layout into mono float32 in [-1.0, 1.0].
+    CRITICAL: Normalizes integer dtypes (uint8, int16, int32) BEFORE averaging channels
+    so stereo int16 arrays do not turn into unscaled float64 in [-32768, 32767] via .mean(axis=1).
+    """
+    import numpy as np
+
+    arr = np.asarray(data)
+    if arr.size == 0:
+        return np.zeros(0, dtype=np.float32)
+
+    if arr.dtype == np.uint8:
+        arr_f32 = (arr.astype(np.float32) - 128.0) / 128.0
+    elif arr.dtype == np.int16:
+        arr_f32 = arr.astype(np.float32) / 32768.0
+    elif arr.dtype == np.int32:
+        arr_f32 = arr.astype(np.float32) / 2147483648.0
+    elif np.issubdtype(arr.dtype, np.integer):
+        max_val = float(max(abs(np.iinfo(arr.dtype).min), np.iinfo(arr.dtype).max))
+        arr_f32 = arr.astype(np.float32) / max(1.0, max_val)
+    else:
+        arr_f32 = arr.astype(np.float32, copy=False)
+
+    if arr_f32.ndim > 1:
+        # Handle both (samples, channels) and (channels, samples)
+        if arr_f32.shape[0] <= 8 and arr_f32.shape[0] < arr_f32.shape[-1]:
+            arr_f32 = arr_f32.mean(axis=0, dtype=np.float32)
+        else:
+            arr_f32 = arr_f32.mean(axis=1, dtype=np.float32)
+
+    arr_f32 = np.nan_to_num(arr_f32, nan=0.0, posinf=1.0, neginf=-1.0)
+    return np.ascontiguousarray(arr_f32, dtype=np.float32)
+
+
+def load_audio_16k_mono(path: Path, target_sr: int = 16000) -> "np.ndarray":
+    """
+    Cleanly decode any audio file (.m4a, .mp3, .wav, .flac, etc.) into a
+    16 kHz, mono (1D), float32 numpy array in [-1.0, 1.0].
+    """
+    import numpy as np
+
+    path = Path(path)
+    if not path.exists() or path.stat().st_size == 0:
+        raise FileNotFoundError(f"Audio file not found or empty: {path}")
+
+    # Fast path for standard uncompressed .wav files via scipy
+    if path.suffix.lower() == ".wav":
+        try:
+            from scipy.io import wavfile
+
+            sr, raw = wavfile.read(str(path))
+            mono = normalize_pcm_to_float32(raw)
+            if sr != target_sr and mono.size > 0:
+                from scipy.signal import resample_poly
+                from math import gcd
+
+                g = gcd(int(sr), int(target_sr))
+                mono = resample_poly(mono, int(target_sr) // g, int(sr) // g).astype(np.float32)
+            return np.ascontiguousarray(mono, dtype=np.float32)
+        except Exception as wav_err:
+            logger.debug(f"scipy wavfile read failed for {path.name} ({wav_err}), falling back to ffmpeg.")
+
+    # Universal FFmpeg decode to 16kHz mono float32 PCM (handles .m4a, AAC, MP3, Opus, etc.)
+    ffmpeg_bin = get_ffmpeg_binary()
+    cmd = [
+        ffmpeg_bin,
+        "-nostdin",
+        "-v", "error",
+        "-i", str(path),
+        "-vn",
+        "-f", "f32le",
+        "-acodec", "pcm_f32le",
+        "-ac", "1",
+        "-ar", str(target_sr),
+        "-",
+    ]
+    proc = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=getattr(settings, "AUDIO_CONVERT_TIMEOUT", 7200),
+    )
+    if proc.returncode != 0 or len(proc.stdout) == 0:
+        err_msg = proc.stderr.decode("utf-8", errors="ignore").strip()[:400]
+        raise RuntimeError(f"FFmpeg failed to decode {path.name} to {target_sr}Hz mono float32: {err_msg}")
+
+    audio_f32 = np.frombuffer(proc.stdout, dtype=np.float32).copy()
+    audio_f32 = np.nan_to_num(audio_f32, nan=0.0, posinf=1.0, neginf=-1.0)
+    return np.ascontiguousarray(audio_f32, dtype=np.float32)
+
+
+def ensure_16k_mono_wav(
+    input_path: Path,
+    output_path: Optional[Path] = None,
+    *,
+    target_wav_path: Optional[Path] = None,
+) -> Path:
+    """
+    Ensure an audio file is converted to a verified 16 kHz, mono PCM WAV file.
+    If input_path is already a verified 16 kHz mono WAV and output_path is None, returns input_path.
+    """
+    import numpy as np
+    from scipy.io import wavfile
+
+    out = output_path or target_wav_path
+    input_path = Path(input_path)
+    if not input_path.exists():
+        raise FileNotFoundError(f"Audio file not found: {input_path}")
+
+    if input_path.suffix.lower() == ".wav" and out is None:
+        try:
+            sr, data = wavfile.read(str(input_path))
+            channels = 1 if data.ndim == 1 else data.shape[1]
+            if sr == 16000 and channels == 1 and data.dtype == np.int16:
+                return input_path
+        except Exception as exc:
+            logger.debug(f"WAV verification failed for {input_path.name}: {exc}")
+
+    target_wav = out or input_path.with_name(f"{input_path.stem}_16k.wav")
+    target_wav.parent.mkdir(parents=True, exist_ok=True)
+    audio_f32 = load_audio_16k_mono(input_path, target_sr=16000)
+    pcm16 = np.clip(audio_f32 * 32768.0, -32768.0, 32767.0).astype(np.int16)
+    wavfile.write(str(target_wav), 16000, pcm16)
+    return target_wav
+

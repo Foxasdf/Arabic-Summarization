@@ -123,6 +123,7 @@ async def _start_or_get_transcription_job(
     num_speakers: Optional[int],
     denoise_mode: Optional[str],
     asr_model: Optional[str],
+    diarization_backend: Optional[str] = None,
 ) -> dict:
     existing = _transcription_jobs.get(file_id)
     if existing and not existing.get("done"):
@@ -243,11 +244,13 @@ async def _start_or_get_transcription_job(
                         raise RuntimeError(f"فشل تحويل وتنقية الملف الصوتي (ffmpeg): {err or ''}")
                 _broadcast({"step": "preprocessing", "progress": 8, "message": "تم تحويل وتنقية وتجهيز مسارات الصوت بنجاح"})
 
-                backend_label = "Pyannote 3.1 (NVIDIA GPU)"
+                backend_label = diarization_backend_name(diarization_backend)
                 _broadcast({"step": "diarization", "progress": 10,
                             "message": f"جاري فصل وتحديد المتحدثين ({backend_label})..."})
                 turns = None
-                async for kind, val in _run_with_progress(diarize, spk_wav_path, num_speakers):
+                async for kind, val in _run_with_progress(
+                    diarize, spk_wav_path, num_speakers, backend=diarization_backend
+                ):
                     if kind == "progress":
                         _broadcast({"step": "diarization", "progress": val[0], "message": val[1]})
                     elif kind == "heartbeat":
@@ -257,7 +260,7 @@ async def _start_or_get_transcription_job(
                     else:
                         turns = val
                 n_spk = len({t['speaker'] for t in turns}) if turns else 1
-                _broadcast({"step": "diarization", "progress": 25, "message": f"تم اكتشاف {n_spk} متحدث/متحدثين بنجاح عبر Pyannote"})
+                _broadcast({"step": "diarization", "progress": 25, "message": f"تم اكتشاف {n_spk} متحدث/متحدثين بنجاح عبر {backend_label}"})
 
                 import gc
                 gc.collect()
@@ -275,6 +278,7 @@ async def _start_or_get_transcription_job(
                     model_identifier=asr_model,
                     progress_range=(25, 95),
                     speaker_audio_path=spk_wav_path,
+                    diarization_backend=diarization_backend,
                 ):
                     if kind == "progress":
                         _broadcast({"step": "asr", "progress": val[0], "message": val[1]})
@@ -319,6 +323,7 @@ async def transcribe_endpoint(
     num_speakers: Optional[int] = None,
     denoise_mode: Optional[str] = None,
     asr_model: Optional[str] = None,
+    diarization_backend: Optional[str] = None,
 ):
     meeting = await get_meeting(file_id)
     if not meeting:
@@ -356,6 +361,7 @@ async def transcribe_endpoint(
             num_speakers=num_speakers,
             denoise_mode=denoise_mode,
             asr_model=asr_model,
+            diarization_backend=diarization_backend,
         )
 
         sub_q: asyncio.Queue = asyncio.Queue()

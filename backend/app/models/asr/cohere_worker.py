@@ -4,16 +4,31 @@ Runs in a dedicated clean Python process to prevent dynamic link library (DLL)
 symbol collisions on Windows between llama-cpp-python and transcribe_cpp (GGML).
 """
 import os
+import re
 import sys
 import json
 import logging
 from pathlib import Path
 import numpy as np
 
-# Ensure backend venv site-packages is in sys.path
-_venv_site = Path(__file__).resolve().parents[4] / "backend" / ".venv" / "Lib" / "site-packages"
-if _venv_site.exists() and str(_venv_site) not in sys.path:
-    sys.path.insert(0, str(_venv_site))
+# Ensure backend venv site-packages is in sys.path across Windows and Linux/macOS
+_backend_venv = Path(__file__).resolve().parents[4] / "backend" / ".venv"
+_venv_candidates = [_backend_venv / "Lib" / "site-packages"]
+if (_backend_venv / "lib").exists():
+    _venv_candidates.extend((_backend_venv / "lib").glob("python*/site-packages"))
+for _venv_site in _venv_candidates:
+    if _venv_site.exists() and str(_venv_site) not in sys.path:
+        sys.path.insert(0, str(_venv_site))
+
+
+def _clean_cohere_tokens(text: str) -> str:
+    """Strip internal Cohere special tokens (@@@فراغ, @@@ضحك, @@@ضوضاء, ###...)."""
+    if not text:
+        return ""
+    text = re.sub(r"@@@\S+", " ", text)
+    text = re.sub(r"#{2,}[^\s.]*\.?", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
 
 # Set standard output encoding to utf-8
 if hasattr(sys.stdout, "reconfigure"):
@@ -279,14 +294,14 @@ def main():
                     if not text:
                         raise trunc_err
 
-                # Strip internal Cohere silence/blank tokens like @@@فراغ
-                text = text.replace("@@@فراغ", "").strip()
+                # Strip internal Cohere silence/noise/laughter tokens like @@@فراغ, @@@ضحك, @@@ضوضاء, ###...
+                text = _clean_cohere_tokens(text)
                 sys.stdout.write(json.dumps({"status": "ok", "text": text}) + "\n")
                 sys.stdout.flush()
             except Exception as e:
                 # If error had partial_result, extract it
                 partial = getattr(e, "partial_result", None)
-                partial_text = (getattr(partial, "text", "") if partial else "").replace("@@@فراغ", "").strip()
+                partial_text = _clean_cohere_tokens(getattr(partial, "text", "") if partial else "")
                 if partial_text:
                     sys.stdout.write(json.dumps({"status": "ok", "text": partial_text}) + "\n")
                     sys.stdout.flush()
@@ -296,8 +311,9 @@ def main():
                 try:
                     if session and hasattr(session, "close"):
                         session.close()
-                except Exception:
-                    pass
+                except Exception as close_err:
+                    sys.stderr.write(f"[cohere_worker] Warning closing failed session: {close_err}\n")
+                    sys.stderr.flush()
                 try:
                     session = model.session(n_threads=optimal_threads)
                     # Trim 0.15s off the end if audio is long enough to avoid trailing silence loops
@@ -310,12 +326,12 @@ def main():
                     except transcribe_cpp.errors.OutputTruncated as r_trunc:
                         r_part = getattr(r_trunc, "partial_result", None)
                         text = getattr(r_part, "text", "") if r_part else ""
-                    text = text.replace("@@@فراغ", "").strip()
+                    text = _clean_cohere_tokens(text)
                     sys.stdout.write(json.dumps({"status": "ok", "text": text}) + "\n")
                     sys.stdout.flush()
                 except Exception as retry_err:
                     r_part = getattr(retry_err, "partial_result", None)
-                    r_text = (getattr(r_part, "text", "") if r_part else "").replace("@@@فراغ", "").strip()
+                    r_text = _clean_cohere_tokens(getattr(r_part, "text", "") if r_part else "")
                     if r_text:
                         sys.stdout.write(json.dumps({"status": "ok", "text": r_text}) + "\n")
                     else:
@@ -327,14 +343,7 @@ def main():
                 audio_f32 = None
                 res = None
                 slice_count += 1
-                # Periodically refresh session and garbage collect to guarantee zero memory leaks
                 if slice_count % 30 == 0:
-                    try:
-                        if session and hasattr(session, "close"):
-                            session.close()
-                        session = model.session(n_threads=optimal_threads)
-                    except Exception:
-                        pass
                     import gc
                     gc.collect()
 

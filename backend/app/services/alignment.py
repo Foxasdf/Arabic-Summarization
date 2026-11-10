@@ -17,50 +17,245 @@ logger = logging.getLogger(__name__)
 
 def clean_diarization_turns(
     turns: List[Dict],
-    min_dur: float = 0.15,
-    merge_gap: float = 0.5,
+    min_dur: Optional[float] = None,
+    merge_gap: Optional[float] = None,
     punch_min: float = 0.75,
+    absorb_enclosed_micro: bool = False,
+    *,
+    max_same_speaker_gap: Optional[float] = None,
+    min_duration: Optional[float] = None,
+    isolated_min_duration: Optional[float] = None,
+    drop_blip_duration: Optional[float] = None,
 ) -> List[Dict]:
     """Clean raw diarization intervals into conversational speaker turns.
-    Preserves all authentic speech intervals without destructive hole-punching or truncating.
 
-    1. Filters micro-noise clicks (< min_dur).
-    2. Merges same-speaker contiguous or near-adjacent intervals (gap <= merge_gap).
-    3. Preserves concurrent speech tracks so each speaker's voice is retained.
+    1. Drops invalid timestamps and isolated micro-blips (< min_dur, default 0.20s).
+    2. Merges same-speaker overlapping or near-adjacent intervals (gap <= merge_gap, default 0.4s),
+       even when another speaker had a brief enclosed backchannel inside the earlier turn.
+    3. Absorbs micro-segments (< 0.50s) when they are near-adjacent to a same-speaker turn
+       or (when absorb_enclosed_micro=True) enclosed inside another speaker's dominant turn.
+    4. Keeps isolated short turns in [0.25s, 0.50s] (e.g. "نعم", "لا", "طيب", "صحيح") surrounded
+       by silence so +/-200ms boundary padding expands them to ~0.65s-0.90s for Cohere ASR.
     """
     if not turns:
         return []
 
-    # 1. Filter micro-noise clicks (< min_dur)
-    valid = [
-        {"speaker": str(t["speaker"]), "start": round(float(t["start"]), 2), "end": round(float(t["end"]), 2)}
-        for t in turns
-        if (float(t["end"]) - float(t["start"])) >= min_dur
-    ]
-    if not valid:
+    from ..config import settings
+
+    if min_dur is None:
+        min_dur = (
+            float(drop_blip_duration)
+            if drop_blip_duration is not None
+            else float(getattr(settings, "TURN_DROP_BLIP_DURATION_SEC", 0.20))
+        )
+    if merge_gap is None:
+        merge_gap = (
+            float(max_same_speaker_gap)
+            if max_same_speaker_gap is not None
+            else float(getattr(settings, "TURN_MERGE_SAME_SPEAKER_GAP", 0.4))
+        )
+    micro_thresh = (
+        float(min_duration)
+        if min_duration is not None
+        else float(getattr(settings, "TURN_MIN_DURATION_SEC", 0.5))
+    )
+    isolated_min_dur = (
+        float(isolated_min_duration)
+        if isolated_min_duration is not None
+        else float(getattr(settings, "TURN_ISOLATED_MIN_DURATION_SEC", 0.25))
+    )
+
+    # 1. Sanitize and drop invalid or ultra-short noise blips (< min_dur)
+    raw_valid: List[Dict] = []
+    for t in turns:
+        st = max(0.0, float(t.get("start", 0.0)))
+        en = float(t.get("end", 0.0))
+        if en - st < min_dur:
+            continue
+        spk = str(t.get("speaker") or "SPEAKER_00")
+        raw_valid.append({"speaker": spk, "start": round(st, 2), "end": round(en, 2)})
+
+    if not raw_valid:
         return []
 
-    # 2. Chronological same-speaker merging: ONLY merge strictly consecutive turns of same speaker
-    valid.sort(key=lambda t: (t["start"], t["end"]))
+    raw_valid.sort(key=lambda t: (t["start"], t["end"]))
+
+    # 2. Merge same-speaker turns that overlap (gap < 0) or have gap <= merge_gap
+    # when no other speaker is active inside the gap [prev_same["end"], cur["start"]].
+    # For micro-segments (< micro_thresh = 0.5s), allow slightly wider same-speaker absorption (up to 2 * merge_gap).
     merged_turns: List[Dict] = []
-    for t in valid:
-        if not merged_turns:
-            merged_turns.append(dict(t))
-            continue
-        prev = merged_turns[-1]
-        if t["speaker"] == prev["speaker"] and 0.0 <= (t["start"] - prev["end"]) <= merge_gap:
-            prev["end"] = max(prev["end"], t["end"])
+    for t in raw_valid:
+        cur = dict(t)
+        cur_dur = cur["end"] - cur["start"]
+        merged = False
+
+        # Search backwards for the most recent turn of the same speaker
+        for idx in range(len(merged_turns) - 1, -1, -1):
+            prev = merged_turns[idx]
+            if prev["speaker"] != cur["speaker"]:
+                continue
+
+            gap = cur["start"] - prev["end"]
+            effective_gap_limit = merge_gap * 1.75 if (cur_dur < micro_thresh or (prev["end"] - prev["start"]) < micro_thresh) else merge_gap
+
+            if gap <= effective_gap_limit:
+                # Check if another speaker has a non-enclosed turn occupying the gap [prev["end"], cur["start"]]
+                intervening = False
+                if gap > 0.0:
+                    for other in merged_turns[idx + 1:]:
+                        if other["speaker"] != cur["speaker"]:
+                            # Intervening if it overlaps the gap and wasn't completely finished before prev["end"]
+                            ov = min(cur["start"], other["end"]) - max(prev["end"], other["start"])
+                            if ov > 0.05 or (other["start"] >= prev["end"] - 0.05 and other["end"] <= cur["start"] + 0.05):
+                                intervening = True
+                                break
+                if not intervening:
+                    prev["end"] = round(max(prev["end"], cur["end"]), 2)
+                    merged = True
+            break
+
+        if not merged:
+            merged_turns.append(cur)
+
+    # 3. Handle remaining micro-segments (< 0.50s):
+    # - If absorb_enclosed_micro=True and a <0.50s turn is enclosed inside a dominant turn of another speaker, drop/absorb it.
+    # - If a turn is < isolated_min_dur (0.25s) and min_dur >= 0.20s, drop it unless caller explicitly requested a smaller min_dur (e.g. unit test min_dur=0.15).
+    effective_isolated_min = min(isolated_min_dur, min_dur) if min_dur < 0.20 else isolated_min_dur
+    filtered_turns: List[Dict] = []
+    for i, t in enumerate(merged_turns):
+        dur = t["end"] - t["start"]
+        if dur < micro_thresh:
+            if absorb_enclosed_micro:
+                is_enclosed = any(
+                    i != j
+                    and other["speaker"] != t["speaker"]
+                    and other["start"] - 0.05 <= t["start"]
+                    and other["end"] + 0.05 >= t["end"]
+                    and (other["end"] - other["start"]) >= max(1.0, dur * 2.0)
+                    for j, other in enumerate(merged_turns)
+                )
+                if is_enclosed:
+                    continue
+            if dur < effective_isolated_min:
+                continue
+        filtered_turns.append(t)
+
+    if not filtered_turns and merged_turns:
+        filtered_turns = [merged_turns[0]]
+
+    # 4. Final chronological pass to merge any newly adjacent same-speaker turns
+    filtered_turns.sort(key=lambda t: (t["start"], t["end"]))
+    final_turns: List[Dict] = []
+    for t in filtered_turns:
+        if final_turns and final_turns[-1]["speaker"] == t["speaker"] and (t["start"] - final_turns[-1]["end"]) <= merge_gap:
+            final_turns[-1]["end"] = round(max(final_turns[-1]["end"], t["end"]), 2)
         else:
-            merged_turns.append(dict(t))
+            final_turns.append({
+                "speaker": t.get("speaker") or "SPEAKER_00",
+                "start": round(float(t["start"]), 2),
+                "end": round(float(t["end"]), 2),
+            })
 
-    # 3. Ensure speaker name and valid rounded timestamps
-    for t in merged_turns:
-        if not t.get("speaker"):
-            t["speaker"] = "SPEAKER_00"
-        t["start"] = round(float(t["start"]), 2)
-        t["end"] = round(float(t["end"]), 2)
+    return final_turns
 
-    return merged_turns
+
+def resolve_turn_overlaps(
+    turns: List[Dict],
+    backchannel_max: float = 0.45,
+    min_piece: float = 0.25,
+    dup_overlap_ratio: float = 0.70,
+    max_passes: int = 2000,
+) -> List[Dict]:
+    """Make diarization turns non-overlapping for single-channel ASR slicing.
+
+    1. Near-duplicate simultaneous turns (overlap >= 70% of the shorter turn and
+       comparable lengths) -> keep only the longer one.
+    2. Turn B enclosed inside a longer turn A of another speaker:
+       - B < backchannel_max (0.45s): brief backchannel blip -> drop B.
+       - otherwise carve A into [A.start, B.start] and [B.end, A.end]
+         (pieces shorter than min_piece are discarded).
+    3. Partial handover overlap (prev.end > cur.start, different speakers):
+       split at the overlap midpoint so the shared audio is transcribed once.
+    Returns turns sorted chronologically with no cross-speaker overlap.
+    """
+    work = [
+        {"speaker": str(t.get("speaker") or "SPEAKER_00"), "start": float(t["start"]), "end": float(t["end"])}
+        for t in turns
+        if float(t["end"]) - float(t["start"]) > 0
+    ]
+
+    def _dur(t: Dict) -> float:
+        return t["end"] - t["start"]
+
+    for _ in range(max_passes):
+        work.sort(key=lambda t: (t["start"], t["end"]))
+        changed = False
+        n = len(work)
+        for i in range(n):
+            a = work[i]
+            for j in range(i + 1, n):
+                b = work[j]
+                if b["start"] >= a["end"]:
+                    break
+                if a["speaker"] == b["speaker"]:
+                    a["end"] = max(a["end"], b["end"])
+                    work.remove(b)
+                    changed = True
+                    break
+                ov = min(a["end"], b["end"]) - max(a["start"], b["start"])
+                if ov <= 0.0:
+                    continue
+                long_t, short_t = (a, b) if _dur(a) >= _dur(b) else (b, a)
+                ld, sd = _dur(long_t), _dur(short_t)
+
+                # 1. Near-identical simultaneous turns -> keep the longer one
+                if ov >= dup_overlap_ratio * sd and ld <= max(2.0 * sd, sd + 1.0):
+                    work.remove(short_t)
+                    changed = True
+                    break
+
+                # 2. Enclosed turn (>= 90% of the short turn inside the long turn)
+                if ov >= 0.9 * sd:
+                    if sd < backchannel_max:
+                        work.remove(short_t)
+                    else:
+                        work.remove(long_t)
+                        left = {"speaker": long_t["speaker"], "start": long_t["start"], "end": min(long_t["end"], short_t["start"])}
+                        right = {"speaker": long_t["speaker"], "start": max(long_t["start"], short_t["end"]), "end": long_t["end"]}
+                        for piece in (left, right):
+                            if _dur(piece) >= min_piece:
+                                work.append(piece)
+                    changed = True
+                    break
+
+                # 3. Partial handover overlap -> preserve short turns (< 1.5s) when paired with
+                # a longer turn (>= 1.5s) by trimming the longer turn; only use midpoint splitting
+                # when both turns are >= 1.5s (or both < 1.5s).
+                first, second = (a, b) if a["start"] <= b["start"] else (b, a)
+                f_dur, s_dur = _dur(first), _dur(second)
+                if f_dur < 1.5 and s_dur >= 1.5:
+                    second["start"] = first["end"]
+                elif s_dur < 1.5 and f_dur >= 1.5:
+                    first["end"] = second["start"]
+                else:
+                    mid = 0.5 * (first["end"] + second["start"])
+                    first["end"] = mid
+                    second["start"] = mid
+                for t in (first, second):
+                    if _dur(t) < min_piece and t in work:
+                        work.remove(t)
+                changed = True
+                break
+            if changed:
+                break
+        if not changed:
+            break
+
+    work.sort(key=lambda t: (t["start"], t["end"]))
+    return [
+        {"speaker": t["speaker"], "start": round(t["start"], 2), "end": round(t["end"], 2)}
+        for t in work
+    ]
 
 
 def assign_words_to_speakers(

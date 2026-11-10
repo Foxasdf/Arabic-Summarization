@@ -1,0 +1,167 @@
+{
+  "audio_file": "20261011_133306.m4a",
+  "audio_duration_sec": 397.8,
+  "preprocessing_decode_sec": 1.51,
+  "turn_merging_config": {
+    "TURN_MERGE_SAME_SPEAKER_GAP": 0.4,
+    "TURN_MIN_DURATION_SEC": 0.5,
+    "TURN_ISOLATED_MIN_DURATION_SEC": 0.25,
+    "TURN_DROP_BLIP_DURATION_SEC": 0.2,
+    "TURN_PAD_MS": 200
+  },
+  "pyannote": {
+    "engine": "Pyannote 3.1 (Local Offline)",
+    "diarization_time_sec": 530.71,
+    "asr_time_sec": 140.55,
+    "total_pipeline_time_sec": 671.26,
+    "raw_turns": {
+      "count": 127,
+      "unique_speakers": 4,
+      "speakers": [
+        "SPEAKER_00",
+        "SPEAKER_01",
+        "SPEAKER_02",
+        "SPEAKER_03"
+      ],
+      "avg_duration_sec": 3.39,
+      "min_duration_sec": 0.02,
+      "max_duration_sec": 26.56,
+      "sub_0_5s_count": 35,
+      "total_speech_sec": 430.52
+    },
+    "cleaned_turns": {
+      "count": 93,
+      "unique_speakers": 4,
+      "speakers": [
+        "SPEAKER_00",
+        "SPEAKER_01",
+        "SPEAKER_02",
+        "SPEAKER_03"
+      ],
+      "avg_duration_sec": 4.44,
+      "min_duration_sec": 0.22,
+      "max_duration_sec": 26.56,
+      "sub_0_5s_count": 16,
+      "total_speech_sec": 413.03
+    },
+    "asr_windows": {
+      "count": 103,
+      "unique_speakers": 4,
+      "speakers": [
+        "SPEAKER_00",
+        "SPEAKER_01",
+        "SPEAKER_02",
+        "SPEAKER_03"
+      ],
+      "avg_duration_sec": 3.47,
+      "min_duration_sec": 0.29,
+      "max_duration_sec": 17.73,
+      "sub_0_5s_count": 6,
+      "total_speech_sec": 357.64
+    },
+    "final_utterances": {
+      "count": 79,
+      "unique_speakers": 4,
+      "speakers": [
+        "SPEAKER_00",
+        "SPEAKER_01",
+        "SPEAKER_02",
+        "SPEAKER_03"
+      ],
+      "avg_duration_sec": 4.81,
+      "min_duration_sec": 0.42,
+      "max_duration_sec": 22.09,
+      "sub_0_5s_count": 5,
+      "total_speech_sec": 379.89
+    },
+    "vs_previous_baseline": {
+      "previous_baseline_turns": 105,
+      "candidate_turns": 79,
+      "previous_baseline_avg_turn_sec": 3.66,
+      "candidate_avg_turn_sec": 4.81,
+      "previous_baseline_words": 900,
+      "candidate_words": 615,
+      "vocabulary_jaccard_pct": 37.8,
+      "previous_baseline_leaked_special_tags": 0,
+      "candidate_leaked_special_tags": 0
+    }
+  },
+  "nemotron_3": {
+    "engine": "NVIDIA Nemotron-3-Diarization (Transformers)",
+    "diarization_time_sec": 13.78,
+    "asr_time_sec": 149.49,
+    "total_pipeline_time_sec": 163.27,
+    "raw_turns": {
+      "count": 196,
+      "unique_speakers": 5,
+      "speakers": [
+        "SPEAKER_00",
+        "SPEAKER_01",
+        "SPEAKER_02",
+        "SPEAKER_03",
+        "SPEAKER_04"
+      ],
+      "avg_duration_sec": 1.85,
+      "min_duration_sec": 0.01,
+      "max_duration_sec": 19.52,
+      "sub_0_5s_count": 32,
+      "total_speech_sec": 362.17
+    },
+    "cleaned_turns": {
+      "count": 167,
+      "unique_speakers": 4,
+      "speakers": [
+        "SPEAKER_00",
+        "SPEAKER_01",
+        "SPEAKER_02",
+        "SPEAKER_03"
+      ],
+      "avg_duration_sec": 2.2,
+      "min_duration_sec": 0.16,
+      "max_duration_sec": 21.78,
+      "sub_0_5s_count": 18,
+      "total_speech_sec": 367.04
+    },
+    "asr_windows": {
+      "count": 156,
+      "unique_speakers": 4,
+      "speakers": [
+        "SPEAKER_00",
+        "SPEAKER_01",
+        "SPEAKER_02",
+        "SPEAKER_03"
+      ],
+      "avg_duration_sec": 2.06,
+      "min_duration_sec": 0.31,
+      "max_duration_sec": 13.74,
+      "sub_0_5s_count": 9,
+      "total_speech_sec": 321.46
+    },
+    "final_utterances": {
+      "count": 122,
+      "unique_speakers": 4,
+      "speakers": [
+        "SPEAKER_00",
+        "SPEAKER_01",
+        "SPEAKER_02",
+        "SPEAKER_03"
+      ],
+      "avg_duration_sec": 2.79,
+      "min_duration_sec": 0.31,
+      "max_duration_sec": 45.79,
+      "sub_0_5s_count": 5,
+      "total_speech_sec": 340.24
+    },
+    "vs_previous_baseline": {
+      "previous_baseline_turns": 105,
+      "candidate_turns": 122,
+      "previous_baseline_avg_turn_sec": 3.66,
+      "candidate_avg_turn_sec": 2.79,
+      "previous_baseline_words": 900,
+      "candidate_words": 683,
+      "vocabulary_jaccard_pct": 33.1,
+      "previous_baseline_leaked_special_tags": 0,
+      "candidate_leaked_special_tags": 0
+    }
+  }
+}
